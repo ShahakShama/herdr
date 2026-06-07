@@ -627,7 +627,17 @@ impl App {
             return;
         }
 
-        let argv = vec!["vimrev".to_string(), base];
+        // Launch the review tool through an interactive login shell so a `vimrev`
+        // shell function/alias (or a PATH binary) all resolve — a direct PTY exec
+        // would only find a PATH binary. Override the command with HERDR_REVIEW_CMD.
+        let review_cmd =
+            std::env::var("HERDR_REVIEW_CMD").unwrap_or_else(|_| "vimrev".to_string());
+        let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
+        let argv = vec![
+            self.state.default_shell.clone(),
+            "-ic".to_string(),
+            command_line,
+        ];
         let (rows, cols) = self.state.estimate_pane_size();
         match self.spawn_agent_workspace(review_path, rows, cols, &argv, true) {
             Ok((ws_idx, _tab, _pane)) => {
@@ -693,6 +703,11 @@ impl App {
             })
             .collect()
     }
+}
+
+/// Wrap a value in single quotes for safe interpolation into a shell command.
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub(super) enum AgentStartError {
