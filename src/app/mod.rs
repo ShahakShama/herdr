@@ -1409,6 +1409,9 @@ impl App {
             Mode::ConfirmKill => {
                 self.state.handle_confirm_kill_key(key_event);
             }
+            Mode::Review => {
+                self.handle_review_key(key_event);
+            }
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }

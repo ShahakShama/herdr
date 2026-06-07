@@ -371,7 +371,10 @@ pub fn render_with_runtime_registry(
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else if app.mode == Mode::Home {
+    } else if matches!(
+        app.mode,
+        Mode::Home | Mode::CreateAgent | Mode::ConfirmKill | Mode::Review
+    ) {
         control::render_home_sidebar(app, terminal_runtimes, frame, sidebar_area);
     } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);
@@ -415,7 +418,7 @@ pub fn render_with_runtime_registry(
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::CreateAgent => control::render_create_agent_overlay(app, frame, frame.area()),
         Mode::ConfirmKill => control::render_confirm_kill_overlay(app, frame, frame.area()),
-        Mode::Home | Mode::Terminal => {}
+        Mode::Home | Mode::Review | Mode::Terminal => {}
     }
 }
 

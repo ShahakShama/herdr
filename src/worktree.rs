@@ -136,6 +136,45 @@ pub(crate) fn build_worktree_add_new_branch_command(
     }
 }
 
+/// `git -C <repo_root> worktree add --detach <path> <committish>` — a detached
+/// checkout used for review, so it never disturbs branch-bearing worktrees.
+pub(crate) fn build_worktree_add_detached_command(
+    repo_root: &Path,
+    path: &Path,
+    committish: &str,
+) -> WorktreeCommand {
+    WorktreeCommand {
+        program: "git".to_string(),
+        args: vec![
+            "-C".to_string(),
+            repo_root.display().to_string(),
+            "worktree".to_string(),
+            "add".to_string(),
+            "--detach".to_string(),
+            path.display().to_string(),
+            committish.to_string(),
+        ],
+    }
+}
+
+/// `git -C <worktree> checkout --detach <committish>` — re-point an existing
+/// review worktree at another branch without moving any branch ref.
+pub(crate) fn build_checkout_detached_command(
+    worktree: &Path,
+    committish: &str,
+) -> WorktreeCommand {
+    WorktreeCommand {
+        program: "git".to_string(),
+        args: vec![
+            "-C".to_string(),
+            worktree.display().to_string(),
+            "checkout".to_string(),
+            "--detach".to_string(),
+            committish.to_string(),
+        ],
+    }
+}
+
 pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), String> {
     let output = std::process::Command::new(&command.program)
         .args(&command.args)

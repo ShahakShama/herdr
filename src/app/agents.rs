@@ -505,6 +505,79 @@ impl App {
         self.state.name_input.clear();
     }
 
+    /// Handle a key while in [`Mode::Review`] (the branch picker).
+    pub(super) fn handle_review_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Esc => {
+                self.state.mode = Mode::Home;
+                self.state.control.review = None;
+            }
+            KeyCode::Up => self.state.review_move_selection(-1),
+            KeyCode::Down => self.state.review_move_selection(1),
+            KeyCode::Enter => self.open_review_branch(),
+            _ => {}
+        }
+    }
+
+    /// Open `vimrev` on the selected branch in a per-repo detached review
+    /// worktree, diffing against the branch's Graphite parent. The dedicated
+    /// review worktree is the only checkout that ever moves, so live agent
+    /// worktrees are never disturbed.
+    fn open_review_branch(&mut self) {
+        let Some(review) = self.state.control.review.as_ref() else {
+            self.state.mode = Mode::Home;
+            return;
+        };
+        let Some(branch) = review.branches.get(review.selected) else {
+            return;
+        };
+        let repo = review.repo.clone();
+        let branch_name = branch.name.clone();
+        let review_path = self
+            .state
+            .worktree_directory
+            .join(format!("{}-review", repo.label));
+        let base = crate::workspace::review_base(&repo.root, &branch_name);
+
+        let command = if review_path.exists() {
+            crate::worktree::build_checkout_detached_command(&review_path, &branch_name)
+        } else {
+            crate::worktree::build_worktree_add_detached_command(
+                &repo.root,
+                &review_path,
+                &branch_name,
+            )
+        };
+        if let Err(err) = crate::worktree::run_worktree_command(&command) {
+            tracing::warn!(error = %err, "review worktree setup failed");
+            self.state.set_home_toast("review failed", err);
+            self.state.mode = Mode::Home;
+            self.state.control.review = None;
+            return;
+        }
+
+        let argv = vec!["vimrev".to_string(), base];
+        let (rows, cols) = self.state.estimate_pane_size();
+        match self.spawn_agent_workspace(review_path, rows, cols, &argv, true) {
+            Ok((ws_idx, _tab, _pane)) => {
+                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                    ws.set_custom_name(format!("review: {branch_name}"));
+                }
+                self.state.active = Some(ws_idx);
+                self.state.selected = ws_idx;
+                self.state.control.focus = crate::app::state::FocusPane::Main;
+            }
+            Err(err) => {
+                let body = self.agent_start_error_body(err);
+                tracing::warn!(error = %body.message, "review spawn failed");
+                self.state.set_home_toast("review failed", body.message);
+            }
+        }
+        self.state.mode = Mode::Home;
+        self.state.control.review = None;
+    }
+
     fn agent_info(
         &self,
         ws_idx: usize,

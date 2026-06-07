@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::state::FocusPane;
+use crate::app::state::{FocusPane, Mode};
 use crate::app::AppState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -44,8 +44,105 @@ pub(super) fn render_home_sidebar(
 
     let _ = terminal_runtimes;
     let (control_area, agents_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
-    render_control_half(app, frame, control_area);
+    if app.mode == Mode::Review {
+        render_review_half(app, frame, control_area);
+    } else {
+        render_control_half(app, frame, control_area);
+    }
     render_agents_half(app, frame, agents_area);
+}
+
+/// Top half while reviewing: a branch picker for the repository under review.
+fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let Some(review) = app.control.review.as_ref() else {
+        return;
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(" review: {}", review.repo.label),
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    if area.height <= CONTROL_HEADER_ROWS {
+        return;
+    }
+    let body = Rect::new(
+        area.x,
+        area.y + CONTROL_HEADER_ROWS,
+        area.width,
+        area.height - CONTROL_HEADER_ROWS,
+    );
+    let footer_y = area.y + area.height.saturating_sub(1);
+    let list_rows = body.height.saturating_sub(1) as usize;
+
+    if review.branches.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " no branches",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ))),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+    } else {
+        let scroll = review.scroll.min(review.selected);
+        for (row, (idx, branch)) in review
+            .branches
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .enumerate()
+        {
+            if row >= list_rows {
+                break;
+            }
+            let y = body.y + row as u16;
+            let selected = idx == review.selected;
+            if selected {
+                let buf = frame.buffer_mut();
+                for x in body.x..body.x + body.width {
+                    buf[(x, y)].set_style(Style::default().bg(p.surface0));
+                }
+            }
+            let label_style = if selected {
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+            } else if branch.is_remote {
+                Style::default().fg(p.overlay0)
+            } else {
+                Style::default().fg(p.subtext0)
+            };
+            let marker = if branch.is_current { "● " } else { "  " };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(p.green)),
+                    Span::styled(
+                        truncate(&branch.name, body.width.saturating_sub(3) as usize),
+                        label_style,
+                    ),
+                ]))
+                .style(if selected {
+                    Style::default().bg(p.surface0)
+                } else {
+                    Style::default()
+                }),
+                Rect::new(body.x, y, body.width, 1),
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " enter open · esc back",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        Rect::new(area.x, footer_y, area.width, 1),
+    );
 }
 
 /// Bottom half: every running agent with title, status, repo, and summary;

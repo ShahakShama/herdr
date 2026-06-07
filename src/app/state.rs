@@ -743,6 +743,8 @@ pub enum Mode {
     CreateAgent,
     /// Confirm killing the selected agent.
     ConfirmKill,
+    /// Review: branch picker for the selected repo (control half → review half).
+    Review,
     Onboarding,
     ReleaseNotes,
     ProductAnnouncement,
@@ -864,6 +866,19 @@ pub enum LeftHalf {
     Agents,
 }
 
+/// Branch-picker state while reviewing a repository.
+#[derive(Debug, Clone)]
+pub struct ReviewState {
+    /// Repository being reviewed.
+    pub repo: crate::workspace::Repository,
+    /// Branches offered for review.
+    pub branches: Vec<crate::workspace::Branch>,
+    /// Selected branch index.
+    pub selected: usize,
+    /// Scroll offset for the branch list.
+    pub scroll: usize,
+}
+
 /// State backing the keyboard-first control surface: the repository registry and
 /// the focus/selection model for the home screen.
 #[derive(Debug, Clone, Default)]
@@ -884,6 +899,8 @@ pub struct ControlState {
     pub focus: FocusPane,
     /// Last-focused left half, for returning from Main via `alt+h`.
     pub last_left: LeftHalf,
+    /// Active review branch-picker, when in [`Mode::Review`].
+    pub review: Option<ReviewState>,
 }
 
 impl ControlState {

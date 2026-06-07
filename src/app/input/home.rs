@@ -7,7 +7,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::app::state::{AppState, FocusPane, LeftHalf, Mode};
+use crate::app::state::{AppState, FocusPane, LeftHalf, Mode, ReviewState};
 use crate::app::App;
 use crate::input::TerminalKey;
 
@@ -147,7 +147,24 @@ impl AppState {
     }
 
     fn request_home_review(&mut self) {
-        // Phase 4: open the review flow for the selected repository.
+        // Open the branch picker for the selected repository.
+        if let Some(repo) = self.control.selected_repository().cloned() {
+            let branches = crate::workspace::list_branches(&repo.root);
+            self.control.review = Some(ReviewState {
+                repo,
+                branches,
+                selected: 0,
+                scroll: 0,
+            });
+            self.mode = Mode::Review;
+        }
+    }
+
+    /// Move the branch selection in the review picker.
+    pub(crate) fn review_move_selection(&mut self, delta: isize) {
+        if let Some(review) = self.control.review.as_mut() {
+            review.selected = step_index(review.selected, delta, review.branches.len());
+        }
     }
 
     fn request_home_kill_agent(&mut self) {
@@ -357,6 +374,44 @@ mod tests {
         state.handle_confirm_kill_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
         assert_eq!(state.mode, Mode::Home);
         assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn alt_r_opens_review_picker_and_arrows_clamp() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.control.repos = vec![crate::workspace::Repository {
+            key: "a".into(),
+            root: "/a".into(),
+            label: "a".into(),
+        }];
+        state.control.focus = FocusPane::Control;
+
+        assert!(state.apply_home_key(alt('r')));
+        assert_eq!(state.mode, Mode::Review);
+        assert!(state.control.review.is_some());
+
+        // Seed branches and verify selection clamps within bounds.
+        if let Some(review) = state.control.review.as_mut() {
+            review.branches = vec![
+                crate::workspace::Branch {
+                    name: "main".into(),
+                    is_current: true,
+                    is_remote: false,
+                },
+                crate::workspace::Branch {
+                    name: "feat".into(),
+                    is_current: false,
+                    is_remote: false,
+                },
+            ];
+        }
+        state.review_move_selection(1);
+        assert_eq!(state.control.review.as_ref().unwrap().selected, 1);
+        state.review_move_selection(1);
+        assert_eq!(state.control.review.as_ref().unwrap().selected, 1);
+        state.review_move_selection(-5);
+        assert_eq!(state.control.review.as_ref().unwrap().selected, 0);
     }
 
     #[test]
