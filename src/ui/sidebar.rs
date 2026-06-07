@@ -1052,7 +1052,7 @@ fn render_workspace_list(
     }
 }
 
-fn render_agent_detail(
+pub(super) fn render_agent_detail(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,

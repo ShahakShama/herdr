@@ -5,6 +5,7 @@ use ratatui::{
     Frame,
 };
 
+mod control;
 mod dialogs;
 mod keybind_help;
 mod menus;
@@ -369,6 +370,8 @@ pub fn render_with_runtime_registry(
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
+    } else if app.mode == Mode::Home {
+        control::render_home_sidebar(app, terminal_runtimes, frame, sidebar_area);
     } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);
     } else {
@@ -409,7 +412,7 @@ pub fn render_with_runtime_registry(
         Mode::GlobalMenu => render_global_launcher_menu(app, frame),
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
-        Mode::Terminal => {}
+        Mode::Home | Mode::Terminal => {}
     }
 }
 

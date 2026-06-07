@@ -148,7 +148,7 @@ pub fn list_branches(repo_root: &Path) -> Vec<Branch> {
             .unwrap_or(remote.name.as_str());
         !local_names.contains(bare)
     });
-    remotes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    remotes.sort_by_key(|branch| branch.name.to_lowercase());
 
     locals.extend(remotes);
     locals

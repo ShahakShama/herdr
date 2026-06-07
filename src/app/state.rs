@@ -737,6 +737,8 @@ pub struct ViewState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    /// Keyboard-first home: Control (repos) + Agents halves with a Main pane.
+    Home,
     Onboarding,
     ReleaseNotes,
     ProductAnnouncement,
@@ -828,6 +830,93 @@ pub enum AgentPanelScope {
     CurrentWorkspace,
     #[default]
     AllWorkspaces,
+}
+
+// ---------------------------------------------------------------------------
+// Control surface state (keyboard-first home)
+// ---------------------------------------------------------------------------
+
+/// Which of the three keyboard-first panes currently has focus.
+///
+/// Layout: Control (top-left) and Agents (bottom-left) make up the left column;
+/// Main (right) shows the focused agent's pane or the review tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FocusPane {
+    /// Repository list / review picker (top-left).
+    #[default]
+    Control,
+    /// Running agents (bottom-left).
+    Agents,
+    /// Active agent pane or review tool (right).
+    Main,
+}
+
+/// Which left-column half was focused most recently, so `alt+h` from Main can
+/// return there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeftHalf {
+    #[default]
+    Control,
+    Agents,
+}
+
+/// State backing the keyboard-first control surface: the repository registry and
+/// the focus/selection model for the home screen.
+#[derive(Debug, Clone, Default)]
+pub struct ControlState {
+    /// Repositories discovered under `scan_root`.
+    pub repos: Vec<crate::workspace::Repository>,
+    /// Directory scanned for repositories (default `~/workspace`).
+    // Read by `rescan` (wired to a refresh action in a later phase).
+    #[allow(dead_code)]
+    pub scan_root: Option<std::path::PathBuf>,
+    /// Selected repository index in the control half.
+    pub selected_repo: usize,
+    /// Scroll offset for the repository list.
+    pub repo_scroll: usize,
+    /// Selected agent index in the agents half.
+    pub selected_agent: usize,
+    /// Which pane currently has focus.
+    pub focus: FocusPane,
+    /// Last-focused left half, for returning from Main via `alt+h`.
+    pub last_left: LeftHalf,
+}
+
+impl ControlState {
+    /// Build the registry by scanning `scan_root` (or the default `~/workspace`).
+    pub fn scanned(scan_root: Option<std::path::PathBuf>) -> Self {
+        let root = scan_root.or_else(crate::workspace::default_scan_root);
+        let repos = root
+            .as_deref()
+            .map(crate::workspace::scan_repositories)
+            .unwrap_or_default();
+        Self {
+            repos,
+            scan_root: root,
+            ..Self::default()
+        }
+    }
+
+    /// Re-scan the configured root and clamp the selection.
+    // Wired to a refresh action / create-agent follow-up in a later phase.
+    #[allow(dead_code)]
+    pub fn rescan(&mut self) {
+        if let Some(root) = self.scan_root.clone().or_else(crate::workspace::default_scan_root)
+        {
+            self.repos = crate::workspace::scan_repositories(&root);
+            self.scan_root = Some(root);
+        }
+        if self.selected_repo >= self.repos.len() {
+            self.selected_repo = self.repos.len().saturating_sub(1);
+        }
+    }
+
+    /// The repository currently selected in the control half.
+    // Consumed by the create-agent / review flows in later phases.
+    #[allow(dead_code)]
+    pub fn selected_repository(&self) -> Option<&crate::workspace::Repository> {
+        self.repos.get(self.selected_repo)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,6 +1478,8 @@ pub struct AppState {
     /// Terminal runtimes that should be shut down by the app/runtime layer
     /// after state has detached their terminal metadata.
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
+    /// Keyboard-first control surface: repository registry + focus/selection.
+    pub control: ControlState,
 }
 
 impl AppState {
@@ -1699,6 +1790,7 @@ impl AppState {
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            control: ControlState::default(),
         }
     }
 

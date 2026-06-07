@@ -1,0 +1,242 @@
+//! Keyboard-first home input: directional pane focus, list selection, and the
+//! alt-direct command chords for the control surface.
+//!
+//! Layout panes: Control (top-left, repos), Agents (bottom-left), Main (right).
+//! `alt+h/j/k/l` moves focus between them; arrows move the selection inside the
+//! focused list; Enter activates the selection but leaves focus where it is.
+
+use crossterm::event::{KeyCode, KeyModifiers};
+
+use crate::app::state::{AppState, FocusPane, LeftHalf, Mode};
+use crate::app::App;
+use crate::input::TerminalKey;
+
+impl App {
+    /// Async entry for home-mode keys. Applies the command, and (TODO, next
+    /// phase) forwards unconsumed keys to the focused agent pane when Main has
+    /// focus.
+    pub(super) async fn handle_home_key(&mut self, key: TerminalKey) {
+        let _consumed = self.state.apply_home_key(key);
+    }
+}
+
+impl AppState {
+    /// Handle a key while in [`Mode::Home`]. Returns `true` when the key was a
+    /// home command and was consumed; `false` means it should fall through (e.g.
+    /// to the focused agent pane when focus is on Main).
+    pub(crate) fn apply_home_key(&mut self, key: TerminalKey) -> bool {
+        let event = key.as_key_event();
+        let alt = event.modifiers.contains(KeyModifiers::ALT);
+
+        match (event.code, alt) {
+            // Directional pane focus.
+            (KeyCode::Char('h'), true) => self.home_focus_left(),
+            (KeyCode::Char('j'), true) => self.set_home_focus(FocusPane::Agents),
+            (KeyCode::Char('k'), true) => self.set_home_focus(FocusPane::Control),
+            (KeyCode::Char('l'), true) => self.set_home_focus(FocusPane::Main),
+
+            // Commands.
+            (KeyCode::Char('q'), true) => self.should_quit = true,
+            (KeyCode::Char(','), true) => self.mode = Mode::Settings,
+            (KeyCode::Char('?'), true) => self.mode = Mode::KeybindHelp,
+            (KeyCode::Char('n'), true) => self.request_home_new_agent(),
+            (KeyCode::Char('r'), true) => self.request_home_review(),
+            (KeyCode::Char('x'), true) => self.request_home_kill_agent(),
+            (KeyCode::Char('p'), true) => self.request_home_submit_pr(),
+
+            // Jump to agent N (alt+1..alt+9).
+            (KeyCode::Char(c), true) if c.is_ascii_digit() && c != '0' => {
+                self.home_jump_to_agent((c as u8 - b'1') as usize);
+            }
+
+            // Selection within the focused list.
+            (KeyCode::Up, false) => self.home_move_selection(-1),
+            (KeyCode::Down, false) => self.home_move_selection(1),
+            (KeyCode::Enter, false) => self.home_activate(),
+            (KeyCode::Esc, false) => self.home_back(),
+
+            _ => return false,
+        }
+        true
+    }
+
+    fn set_home_focus(&mut self, focus: FocusPane) {
+        self.control.focus = focus;
+        match focus {
+            FocusPane::Control => self.control.last_left = LeftHalf::Control,
+            FocusPane::Agents => self.control.last_left = LeftHalf::Agents,
+            FocusPane::Main => {}
+        }
+    }
+
+    fn home_focus_left(&mut self) {
+        let target = match self.control.last_left {
+            LeftHalf::Control => FocusPane::Control,
+            LeftHalf::Agents => FocusPane::Agents,
+        };
+        self.control.focus = target;
+    }
+
+    fn home_agent_count(&self) -> usize {
+        crate::ui::agent_panel_entries(self).len()
+    }
+
+    fn home_move_selection(&mut self, delta: isize) {
+        match self.control.focus {
+            FocusPane::Control => {
+                let len = self.control.repos.len();
+                self.control.selected_repo = step_index(self.control.selected_repo, delta, len);
+            }
+            FocusPane::Agents => {
+                let len = self.home_agent_count();
+                self.control.selected_agent = step_index(self.control.selected_agent, delta, len);
+            }
+            FocusPane::Main => {}
+        }
+    }
+
+    /// Enter: activate the current selection without moving focus.
+    fn home_activate(&mut self) {
+        match self.control.focus {
+            FocusPane::Agents => self.home_focus_selected_agent_workspace(),
+            // Control activation (expand repo actions) and Main are no-ops for now.
+            FocusPane::Control | FocusPane::Main => {}
+        }
+    }
+
+    fn home_back(&mut self) {
+        // From Main, Esc returns to the last-focused left half.
+        if self.control.focus == FocusPane::Main {
+            self.home_focus_left();
+        }
+    }
+
+    fn home_jump_to_agent(&mut self, index: usize) {
+        let len = self.home_agent_count();
+        if index >= len {
+            return;
+        }
+        self.control.selected_agent = index;
+        self.control.focus = FocusPane::Agents;
+        self.control.last_left = LeftHalf::Agents;
+        self.home_focus_selected_agent_workspace();
+    }
+
+    /// Make the selected agent's workspace active so its pane fills Main.
+    fn home_focus_selected_agent_workspace(&mut self) {
+        let entries = crate::ui::agent_panel_entries(self);
+        if let Some(entry) = entries.get(self.control.selected_agent) {
+            let ws_idx = entry.ws_idx;
+            if self.active != Some(ws_idx) {
+                self.active = Some(ws_idx);
+                self.selected = ws_idx;
+                self.mark_session_dirty();
+            }
+        }
+    }
+
+    // --- command stubs wired in later phases -------------------------------
+
+    fn request_home_new_agent(&mut self) {
+        // Phase 2: open the create-agent flow for the selected repository.
+    }
+
+    fn request_home_review(&mut self) {
+        // Phase 4: open the review flow for the selected repository.
+    }
+
+    fn request_home_kill_agent(&mut self) {
+        // Phase 3: confirm-and-kill the selected agent.
+    }
+
+    fn request_home_submit_pr(&mut self) {
+        // Phase 5: submit a PR for the selected branch / agent.
+    }
+}
+
+/// Move `index` by `delta`, clamped to `[0, len)`. Returns 0 when `len == 0`.
+fn step_index(index: usize, delta: isize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let max = len - 1;
+    let next = index as isize + delta;
+    next.clamp(0, max as isize) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::TerminalKey;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn alt(c: char) -> TerminalKey {
+        TerminalKey::from(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+    }
+
+    fn plain(code: KeyCode) -> TerminalKey {
+        TerminalKey::from(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    #[test]
+    fn directional_focus_moves_between_panes() {
+        let mut state = AppState::test_new();
+        assert_eq!(state.control.focus, FocusPane::Control);
+
+        assert!(state.apply_home_key(alt('j')));
+        assert_eq!(state.control.focus, FocusPane::Agents);
+
+        assert!(state.apply_home_key(alt('l')));
+        assert_eq!(state.control.focus, FocusPane::Main);
+
+        // alt+h returns to the last-focused left half (Agents).
+        assert!(state.apply_home_key(alt('h')));
+        assert_eq!(state.control.focus, FocusPane::Agents);
+
+        assert!(state.apply_home_key(alt('k')));
+        assert_eq!(state.control.focus, FocusPane::Control);
+    }
+
+    #[test]
+    fn repo_selection_clamps_within_bounds() {
+        let mut state = AppState::test_new();
+        state.control.repos = vec![
+            crate::workspace::Repository {
+                key: "a".into(),
+                root: "/a".into(),
+                label: "a".into(),
+            },
+            crate::workspace::Repository {
+                key: "b".into(),
+                root: "/b".into(),
+                label: "b".into(),
+            },
+        ];
+        state.control.focus = FocusPane::Control;
+
+        state.apply_home_key(plain(KeyCode::Up));
+        assert_eq!(state.control.selected_repo, 0);
+        state.apply_home_key(plain(KeyCode::Down));
+        assert_eq!(state.control.selected_repo, 1);
+        state.apply_home_key(plain(KeyCode::Down));
+        assert_eq!(state.control.selected_repo, 1, "clamped at last repo");
+    }
+
+    #[test]
+    fn alt_q_requests_quit_and_alt_comma_opens_settings() {
+        let mut state = AppState::test_new();
+        assert!(state.apply_home_key(alt(',')));
+        assert_eq!(state.mode, Mode::Settings);
+
+        let mut state = AppState::test_new();
+        assert!(state.apply_home_key(alt('q')));
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn unhandled_key_falls_through() {
+        let mut state = AppState::test_new();
+        state.control.focus = FocusPane::Main;
+        assert!(!state.apply_home_key(plain(KeyCode::Char('a'))));
+    }
+}

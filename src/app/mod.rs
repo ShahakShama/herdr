@@ -392,10 +392,9 @@ impl App {
             state::Mode::Onboarding
         } else if startup_product_announcement.is_some() {
             state::Mode::ProductAnnouncement
-        } else if active.is_some() {
-            state::Mode::Terminal
         } else {
-            state::Mode::Navigate
+            // Keyboard-first overhaul: boot into the control-surface home.
+            state::Mode::Home
         };
 
         let mut state = AppState {
@@ -541,6 +540,7 @@ impl App {
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),
+            control: state::ControlState::scanned(None),
         };
 
         state.terminals = restored_terminals;
@@ -1400,6 +1400,9 @@ impl App {
     fn handle_non_terminal_key(&mut self, key: crate::input::TerminalKey) {
         let key_event = key.as_key_event();
         match self.state.mode {
+            Mode::Home => {
+                self.state.apply_home_key(key);
+            }
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }

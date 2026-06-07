@@ -24,6 +24,7 @@ const WORKSPACE_DRAG_THRESHOLD: u16 = 1;
 const TAB_DRAG_THRESHOLD: u16 = 1;
 
 mod copy_mode;
+mod home;
 mod modal;
 mod mouse;
 mod navigate;
@@ -58,6 +59,7 @@ impl App {
     pub(super) async fn handle_key(&mut self, key: TerminalKey) {
         match self.state.mode {
             Mode::Terminal => self.handle_terminal_key(key).await,
+            Mode::Home => self.handle_home_key(key).await,
             Mode::Prefix => self.handle_prefix_key(key),
             Mode::Navigate => self.handle_navigate_key(key),
             Mode::Copy => self.handle_copy_mode_key(key),
@@ -67,7 +69,7 @@ impl App {
                     Mode::Onboarding => self.handle_onboarding_key(key_event),
                     Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                     Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
-                    Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
+                    Mode::Home | Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
                     Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                         handle_rename_key(&mut self.state, key_event)
                     }
