@@ -26,7 +26,46 @@ impl App {
             self.submit_pr_for_selected_agent();
             return;
         }
-        let _consumed = self.state.apply_home_key(key);
+
+        if self.state.apply_home_key(key) {
+            return;
+        }
+        // Unconsumed keys with Main focused are typed into the agent pane.
+        if self.state.control.focus == FocusPane::Main {
+            self.forward_key_to_main(key).await;
+        }
+    }
+
+    /// Encode and forward a key straight to the focused agent pane, bypassing the
+    /// legacy prefix/command interception (the prefix is dropped in this UI).
+    async fn forward_key_to_main(&mut self, key: TerminalKey) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return;
+        };
+        let bytes = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            rt.scroll_reset();
+            rt.encode_terminal_key(key)
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(sender) = self.lookup_runtime_sender(ws_idx, pane_id) {
+            let _ = sender.send_bytes(bytes::Bytes::from(bytes)).await;
+        }
     }
 }
 
@@ -59,11 +98,15 @@ impl AppState {
                 self.home_jump_to_agent((c as u8 - b'1') as usize);
             }
 
-            // Selection within the focused list.
-            (KeyCode::Up, false) => self.home_move_selection(-1),
-            (KeyCode::Down, false) => self.home_move_selection(1),
-            (KeyCode::Enter, false) => self.home_activate(),
-            (KeyCode::Esc, false) => self.home_back(),
+            // Selection/activation only when a left pane is focused; with Main
+            // focused these fall through to the agent pane.
+            (KeyCode::Up, false) if self.control.focus != FocusPane::Main => {
+                self.home_move_selection(-1)
+            }
+            (KeyCode::Down, false) if self.control.focus != FocusPane::Main => {
+                self.home_move_selection(1)
+            }
+            (KeyCode::Enter, false) if self.control.focus != FocusPane::Main => self.home_activate(),
 
             _ => return false,
         }
@@ -111,13 +154,6 @@ impl AppState {
             FocusPane::Agents => self.home_focus_selected_agent_workspace(),
             // Control activation (expand repo actions) and Main are no-ops for now.
             FocusPane::Control | FocusPane::Main => {}
-        }
-    }
-
-    fn home_back(&mut self) {
-        // From Main, Esc returns to the last-focused left half.
-        if self.control.focus == FocusPane::Main {
-            self.home_focus_left();
         }
     }
 
