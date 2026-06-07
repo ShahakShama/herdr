@@ -1403,6 +1403,9 @@ impl App {
             Mode::Home => {
                 self.state.apply_home_key(key);
             }
+            Mode::CreateAgent => {
+                self.handle_create_agent_key(key_event);
+            }
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }

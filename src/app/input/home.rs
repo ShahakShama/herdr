@@ -138,7 +138,12 @@ impl AppState {
     // --- command stubs wired in later phases -------------------------------
 
     fn request_home_new_agent(&mut self) {
-        // Phase 2: open the create-agent flow for the selected repository.
+        // Open the create-agent form for the selected repository.
+        if self.control.selected_repository().is_some() {
+            self.name_input.clear();
+            self.name_input_replace_on_type = false;
+            self.mode = Mode::CreateAgent;
+        }
     }
 
     fn request_home_review(&mut self) {
@@ -231,6 +236,29 @@ mod tests {
         let mut state = AppState::test_new();
         assert!(state.apply_home_key(alt('q')));
         assert!(state.should_quit);
+    }
+
+    #[test]
+    fn alt_n_opens_create_agent_form_when_repo_selected() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.control.repos = vec![crate::workspace::Repository {
+            key: "a".into(),
+            root: "/a".into(),
+            label: "a".into(),
+        }];
+        state.control.focus = FocusPane::Control;
+
+        assert!(state.apply_home_key(alt('n')));
+        assert_eq!(state.mode, Mode::CreateAgent);
+    }
+
+    #[test]
+    fn alt_n_is_noop_without_repos() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.apply_home_key(alt('n'));
+        assert_eq!(state.mode, Mode::Home);
     }
 
     #[test]

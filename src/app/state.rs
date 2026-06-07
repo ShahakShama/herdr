@@ -739,6 +739,8 @@ pub struct ViewState {
 pub enum Mode {
     /// Keyboard-first home: Control (repos) + Agents halves with a Main pane.
     Home,
+    /// Create-agent form: name a new worktree + agent for the selected repo.
+    CreateAgent,
     Onboarding,
     ReleaseNotes,
     ProductAnnouncement,
@@ -912,8 +914,6 @@ impl ControlState {
     }
 
     /// The repository currently selected in the control half.
-    // Consumed by the create-agent / review flows in later phases.
-    #[allow(dead_code)]
     pub fn selected_repository(&self) -> Option<&crate::workspace::Repository> {
         self.repos.get(self.selected_repo)
     }
@@ -1485,6 +1485,17 @@ pub struct AppState {
 impl AppState {
     pub(crate) fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// Show a transient attention toast from a control-surface action.
+    pub(crate) fn set_home_toast(&mut self, title: impl Into<String>, context: impl Into<String>) {
+        self.toast = Some(ToastNotification {
+            kind: ToastKind::NeedsAttention,
+            title: title.into(),
+            context: context.into(),
+            position: None,
+            target: None,
+        });
     }
 
     pub(crate) fn remove_alias_shadowed_by_new_pane(&mut self, pane_id: PaneId) {

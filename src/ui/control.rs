@@ -3,7 +3,7 @@
 //! when in [`Mode::Home`].
 
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -139,6 +139,61 @@ fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {
             Rect::new(area.x, hint_y, area.width, 1),
         );
     }
+}
+
+/// Modal form for naming a new agent/worktree in the selected repository.
+pub(super) fn render_create_agent_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+    let p = &app.palette;
+    let repo_label = app
+        .control
+        .selected_repository()
+        .map(|repo| repo.label.clone())
+        .unwrap_or_else(|| "?".to_string());
+
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 56, 7, p) else {
+        return;
+    };
+    if inner.height < 3 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("new agent in {repo_label}"),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+
+    let (input_text, input_style) = if app.name_input.is_empty() {
+        (
+            "name…".to_string(),
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        )
+    } else {
+        (app.name_input.clone(), Style::default().fg(p.text))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(input_text, input_style))),
+        rows[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter create · esc cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        rows[2],
+    );
 }
 
 fn truncate(text: &str, max_width: usize) -> String {

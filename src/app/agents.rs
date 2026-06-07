@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use super::{terminal_targets::TerminalTargetError, App, Mode};
 use crate::api::schema::{AgentStartParams, SplitDirection};
 
+/// Command launched for a new agent created from the control panel.
+/// TODO: make the agent selectable in the create form.
+const CREATE_AGENT_DEFAULT_ARGV: &[&str] = &["claude"];
+
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
@@ -394,6 +398,111 @@ impl App {
         }
         self.schedule_session_save();
         Ok((ws_idx, result.0, result.1.pane_id))
+    }
+
+    /// Handle a key while in [`Mode::CreateAgent`] (the new-agent name form).
+    pub(super) fn handle_create_agent_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match key.code {
+            KeyCode::Esc => {
+                self.state.mode = Mode::Home;
+                self.state.name_input.clear();
+            }
+            KeyCode::Enter => self.submit_create_agent(),
+            KeyCode::Backspace => {
+                self.state.name_input.pop();
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+            {
+                if self.state.name_input_replace_on_type {
+                    self.state.name_input.clear();
+                    self.state.name_input_replace_on_type = false;
+                }
+                self.state.name_input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Create a worktree for the selected repository and launch an agent in it.
+    /// The worktree name doubles as the workspace title.
+    fn submit_create_agent(&mut self) {
+        let Some(repo) = self.state.control.selected_repository().cloned() else {
+            self.state.mode = Mode::Home;
+            return;
+        };
+        let name = self.state.name_input.trim().to_string();
+        if name.is_empty() {
+            // Keep the form open until a name is provided.
+            return;
+        }
+
+        let branch = format!("worktree/{}", crate::worktree::branch_to_path_slug(&name));
+        let checkout_path = crate::worktree::default_checkout_path(
+            &self.state.worktree_directory,
+            &repo.label,
+            &branch,
+        );
+        let command = crate::worktree::build_worktree_add_new_branch_command(
+            &repo.root,
+            &checkout_path,
+            &branch,
+            "HEAD",
+        );
+        if let Err(err) = crate::worktree::run_worktree_command(&command) {
+            tracing::warn!(error = %err, "create-agent worktree add failed");
+            self.state.set_home_toast("create agent failed", err);
+            self.state.mode = Mode::Home;
+            return;
+        }
+
+        let argv: Vec<String> = CREATE_AGENT_DEFAULT_ARGV
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (rows, cols) = self.state.estimate_pane_size();
+        match self.spawn_agent_workspace(checkout_path.clone(), rows, cols, &argv, true) {
+            Ok((ws_idx, _tab, pane_id)) => {
+                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                    ws.set_custom_name(name.clone());
+                    if let Some(meta) = crate::workspace::git_space_metadata(&checkout_path) {
+                        ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+                            key: meta.key,
+                            label: repo.label.clone(),
+                            repo_root: repo.root.clone(),
+                            checkout_path: checkout_path.clone(),
+                            is_linked_worktree: true,
+                        });
+                    }
+                }
+                if let Some(terminal_id) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|ws| ws.terminal_id(pane_id))
+                    .cloned()
+                {
+                    if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                        terminal.set_agent_name(name.clone());
+                        terminal.set_manual_label(name);
+                    }
+                }
+                // Surface the new agent in Main while staying in the home shell.
+                self.state.active = Some(ws_idx);
+                self.state.selected = ws_idx;
+                self.state.control.focus = crate::app::state::FocusPane::Main;
+            }
+            Err(err) => {
+                let body = self.agent_start_error_body(err);
+                tracing::warn!(error = %body.message, "create-agent spawn failed");
+                self.state.set_home_toast("create agent failed", body.message);
+            }
+        }
+        self.state.mode = Mode::Home;
+        self.state.name_input.clear();
     }
 
     fn agent_info(
