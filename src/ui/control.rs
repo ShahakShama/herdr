@@ -14,7 +14,8 @@ use crate::app::state::FocusPane;
 use crate::app::AppState;
 use crate::terminal::TerminalRuntimeRegistry;
 
-use super::sidebar::{expanded_sidebar_sections, render_agent_detail};
+use super::sidebar::{agent_panel_entries_all, expanded_sidebar_sections};
+use super::status::{agent_icon, state_label, state_label_color};
 
 const CONTROL_HEADER_ROWS: u16 = 2;
 
@@ -41,9 +42,145 @@ pub(super) fn render_home_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
+    let _ = terminal_runtimes;
     let (control_area, agents_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
     render_control_half(app, frame, control_area);
-    render_agent_detail(app, terminal_runtimes, frame, agents_area);
+    render_agents_half(app, frame, agents_area);
+}
+
+/// Bottom half: every running agent with title, status, repo, and summary;
+/// the selected agent is highlighted when the Agents pane has focus.
+fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height < 2 {
+        return;
+    }
+    let p = &app.palette;
+    let focused = app.control.focus == FocusPane::Agents;
+    let dim = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+
+    let separator = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Span::styled(separator, Style::default().fg(p.surface_dim))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let header_style = if focused {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" agents", header_style))),
+        Rect::new(area.x, area.y + 1, area.width, 1),
+    );
+
+    let body = Rect::new(area.x, area.y + 2, area.width, area.height.saturating_sub(2));
+    if body.height == 0 {
+        return;
+    }
+
+    let entries = agent_panel_entries_all(app);
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" no running agents", dim))),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        return;
+    }
+
+    let mut y = body.y;
+    let body_bottom = body.y + body.height;
+    for (idx, entry) in entries.iter().enumerate() {
+        if y + 1 >= body_bottom {
+            break;
+        }
+        let selected = idx == app.control.selected_agent;
+        if selected {
+            let bg = if focused { p.surface0 } else { p.surface_dim };
+            let buf = frame.buffer_mut();
+            for ry in y..(y + 2).min(body_bottom) {
+                for x in body.x..body.x + body.width {
+                    buf[(x, ry)].set_style(Style::default().bg(bg));
+                }
+            }
+        }
+
+        let (icon, icon_style) = agent_icon(entry.state, entry.seen, app.spinner_tick, p);
+        let name_style = if selected {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(icon, icon_style),
+                Span::styled(" ", Style::default()),
+                Span::styled(
+                    truncate(&entry.primary_label, body.width.saturating_sub(3) as usize),
+                    name_style,
+                ),
+            ])),
+            Rect::new(body.x, y, body.width, 1),
+        );
+        y += 1;
+
+        let label = state_label(entry.state, entry.seen);
+        let label_color = state_label_color(entry.state, entry.seen, p);
+        let mut spans = vec![
+            Span::styled("   ", Style::default()),
+            Span::styled(label, Style::default().fg(label_color)),
+        ];
+        if let Some(repo) = app
+            .workspaces
+            .get(entry.ws_idx)
+            .and_then(|ws| ws.worktree_space().map(|m| m.label.clone()))
+        {
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(repo, dim));
+        }
+        if let Some(summary) = &entry.custom_status {
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(truncate(summary, 28), dim));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(body.x, y, body.width, 1),
+        );
+        y += 2; // status line + a one-row gap
+    }
+}
+
+/// Confirmation modal for killing the selected agent.
+pub(super) fn render_confirm_kill_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+    let p = &app.palette;
+    let title = agent_panel_entries_all(app)
+        .get(app.control.selected_agent)
+        .map(|entry| entry.primary_label.clone())
+        .unwrap_or_else(|| "agent".to_string());
+
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 52, 6, p) else {
+        return;
+    };
+    if inner.height < 2 {
+        return;
+    }
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("kill agent “{title}”?"),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "y kill · n cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        rows[1],
+    );
 }
 
 fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {

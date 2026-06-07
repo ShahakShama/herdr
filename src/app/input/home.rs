@@ -78,7 +78,7 @@ impl AppState {
     }
 
     fn home_agent_count(&self) -> usize {
-        crate::ui::agent_panel_entries(self).len()
+        crate::ui::agent_panel_entries_all(self).len()
     }
 
     fn home_move_selection(&mut self, delta: isize) {
@@ -124,7 +124,7 @@ impl AppState {
 
     /// Make the selected agent's workspace active so its pane fills Main.
     fn home_focus_selected_agent_workspace(&mut self) {
-        let entries = crate::ui::agent_panel_entries(self);
+        let entries = crate::ui::agent_panel_entries_all(self);
         if let Some(entry) = entries.get(self.control.selected_agent) {
             let ws_idx = entry.ws_idx;
             if self.active != Some(ws_idx) {
@@ -151,7 +151,60 @@ impl AppState {
     }
 
     fn request_home_kill_agent(&mut self) {
-        // Phase 3: confirm-and-kill the selected agent.
+        // Confirm before killing the selected agent.
+        if self.home_agent_count() > 0 {
+            self.mode = Mode::ConfirmKill;
+        }
+    }
+
+    /// Handle a key while confirming an agent kill.
+    pub(crate) fn handle_confirm_kill_key(&mut self, key: crossterm::event::KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.kill_selected_agent();
+                self.mode = Mode::Home;
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.mode = Mode::Home;
+            }
+            _ => {}
+        }
+    }
+
+    /// Tear down the selected agent's workspace (kills its panes/PTYs) and clamp
+    /// the home selection back into range.
+    fn kill_selected_agent(&mut self) {
+        let entries = crate::ui::agent_panel_entries_all(self);
+        let Some(ws_idx) = entries.get(self.control.selected_agent).map(|e| e.ws_idx) else {
+            return;
+        };
+
+        let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
+        self.workspaces.remove(ws_idx);
+        self.remove_unattached_terminal_ids(workspace_terminal_ids);
+
+        // Adjust active/selected for the removed (and shifted) workspaces.
+        match self.active {
+            Some(active) if active == ws_idx => self.active = None,
+            Some(active) if active > ws_idx => self.active = Some(active - 1),
+            _ => {}
+        }
+        if self.selected > ws_idx {
+            self.selected -= 1;
+        }
+        if !self.workspaces.is_empty() && self.selected >= self.workspaces.len() {
+            self.selected = self.workspaces.len() - 1;
+        }
+
+        let count = crate::ui::agent_panel_entries_all(self).len();
+        if count == 0 {
+            self.control.selected_agent = 0;
+            self.control.focus = FocusPane::Control;
+            self.control.last_left = LeftHalf::Control;
+        } else if self.control.selected_agent >= count {
+            self.control.selected_agent = count - 1;
+        }
+        self.mark_session_dirty();
     }
 
     fn request_home_submit_pr(&mut self) {
@@ -259,6 +312,51 @@ mod tests {
         state.mode = Mode::Home;
         state.apply_home_key(alt('n'));
         assert_eq!(state.mode, Mode::Home);
+    }
+
+    #[test]
+    fn kill_selected_agent_removes_its_workspace_with_confirm() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.workspaces = vec![
+            crate::workspace::Workspace::test_new("a"),
+            crate::workspace::Workspace::test_new("b"),
+        ];
+        state.ensure_test_terminals();
+        // Only agent terminals appear in the agents half, so name them.
+        let terminal_ids: Vec<_> = state
+            .workspaces
+            .iter()
+            .map(|ws| {
+                let pane = ws.tabs[0].root_pane;
+                ws.tabs[0].panes[&pane].attached_terminal_id.clone()
+            })
+            .collect();
+        for (i, terminal_id) in terminal_ids.iter().enumerate() {
+            state
+                .terminals
+                .get_mut(terminal_id)
+                .unwrap()
+                .set_agent_name(format!("agent{i}"));
+        }
+        state.control.focus = FocusPane::Agents;
+        state.control.selected_agent = 1;
+        assert_eq!(crate::ui::agent_panel_entries_all(&state).len(), 2);
+
+        // alt+x asks for confirmation.
+        assert!(state.apply_home_key(alt('x')));
+        assert_eq!(state.mode, Mode::ConfirmKill);
+
+        // Cancelling leaves everything intact.
+        state.handle_confirm_kill_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()));
+        assert_eq!(state.mode, Mode::Home);
+        assert_eq!(state.workspaces.len(), 2);
+
+        // Confirming kills the selected agent's workspace.
+        state.apply_home_key(alt('x'));
+        state.handle_confirm_kill_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::empty()));
+        assert_eq!(state.mode, Mode::Home);
+        assert_eq!(state.workspaces.len(), 1);
     }
 
     #[test]

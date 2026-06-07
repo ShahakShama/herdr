@@ -741,6 +741,8 @@ pub enum Mode {
     Home,
     /// Create-agent form: name a new worktree + agent for the selected repo.
     CreateAgent,
+    /// Confirm killing the selected agent.
+    ConfirmKill,
     Onboarding,
     ReleaseNotes,
     ProductAnnouncement,

@@ -66,7 +66,8 @@ pub(crate) use self::{
     },
     settings::{settings_button_rects, settings_show_primary_action},
     sidebar::{
-        agent_panel_body_rect, agent_panel_entries, agent_panel_scroll_metrics,
+        agent_panel_body_rect, agent_panel_entries, agent_panel_entries_all,
+        agent_panel_scroll_metrics,
         agent_panel_scrollbar_rect, agent_panel_toggle_rect, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
@@ -413,6 +414,7 @@ pub fn render_with_runtime_registry(
         Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
         Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
         Mode::CreateAgent => control::render_create_agent_overlay(app, frame, frame.area()),
+        Mode::ConfirmKill => control::render_confirm_kill_overlay(app, frame, frame.area()),
         Mode::Home | Mode::Terminal => {}
     }
 }

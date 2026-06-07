@@ -125,6 +125,42 @@ pub(crate) fn agent_panel_entries_from(
     agent_panel_entries_with_runtimes(app, Some(terminal_runtimes))
 }
 
+/// Every running agent across all workspaces, independent of the (legacy)
+/// `agent_panel_scope` toggle. Used by the keyboard-first home agents-half.
+pub(crate) fn agent_panel_entries_all(app: &AppState) -> Vec<AgentPanelEntry> {
+    let empty_runtimes = TerminalRuntimeRegistry::new();
+    all_workspace_agent_panel_entries(app, &empty_runtimes)
+}
+
+fn all_workspace_agent_panel_entries(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Vec<AgentPanelEntry> {
+    app.workspaces
+        .iter()
+        .enumerate()
+        .flat_map(|(ws_idx, ws)| {
+            let multi_tab = ws.tabs.len() > 1;
+            let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            ws.pane_details(&app.terminals)
+                .into_iter()
+                .map(move |detail| AgentPanelEntry {
+                    ws_idx,
+                    tab_idx: detail.tab_idx,
+                    pane_id: detail.pane_id,
+                    primary_label: workspace_label.clone(),
+                    primary_tab_label: multi_tab.then_some(detail.tab_label),
+                    agent_label: Some(detail.agent_label),
+                    state: detail.state,
+                    seen: detail.seen,
+                    custom_status: detail.custom_status,
+                    state_labels: detail.state_labels,
+                    working_since: detail.working_since,
+                })
+        })
+        .collect()
+}
+
 fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
@@ -163,30 +199,9 @@ fn agent_panel_entries_with_runtimes(
                 })
                 .collect()
         }
-        AgentPanelScope::AllWorkspaces => app
-            .workspaces
-            .iter()
-            .enumerate()
-            .flat_map(|(ws_idx, ws)| {
-                let multi_tab = ws.tabs.len() > 1;
-                let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
-                ws.pane_details(&app.terminals)
-                    .into_iter()
-                    .map(move |detail| AgentPanelEntry {
-                        ws_idx,
-                        tab_idx: detail.tab_idx,
-                        pane_id: detail.pane_id,
-                        primary_label: workspace_label.clone(),
-                        primary_tab_label: multi_tab.then_some(detail.tab_label),
-                        agent_label: Some(detail.agent_label),
-                        state: detail.state,
-                        seen: detail.seen,
-                        custom_status: detail.custom_status,
-                        state_labels: detail.state_labels,
-                        working_since: detail.working_since,
-                    })
-            })
-            .collect(),
+        AgentPanelScope::AllWorkspaces => {
+            all_workspace_agent_panel_entries(app, terminal_runtimes)
+        }
     }
 }
 

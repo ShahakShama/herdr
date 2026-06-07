@@ -1406,6 +1406,9 @@ impl App {
             Mode::CreateAgent => {
                 self.handle_create_agent_key(key_event);
             }
+            Mode::ConfirmKill => {
+                self.state.handle_confirm_kill_key(key_event);
+            }
             Mode::Prefix => {
                 self.handle_prefix_key(key);
             }
