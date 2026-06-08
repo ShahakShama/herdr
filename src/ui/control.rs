@@ -416,7 +416,7 @@ fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {
         let hint_y = area.y + area.height.saturating_sub(1);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " n new · t term · r review",
+                " enter new · t term",
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
             ))),
             Rect::new(area.x, hint_y, area.width, 1),
@@ -434,14 +434,15 @@ pub(super) fn render_create_agent_overlay(app: &AppState, frame: &mut Frame, are
         .map(|repo| repo.label.clone())
         .unwrap_or_else(|| "?".to_string());
 
-    let Some(inner) = super::widgets::render_modal_shell(frame, area, 56, 7, p) else {
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 56, 8, p) else {
         return;
     };
-    if inner.height < 3 {
+    if inner.height < 4 {
         return;
     }
 
     let rows = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -470,12 +471,60 @@ pub(super) fn render_create_agent_overlay(app: &AppState, frame: &mut Frame, are
         rows[1],
     );
 
+    let marker = if app.control.create_new_branch {
+        "[x]"
+    } else {
+        "[ ]"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "enter create · esc cancel",
-            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            format!("{marker} Create a new branch?"),
+            Style::default().fg(p.text),
         ))),
         rows[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter create · space toggles new branch · esc cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        rows[3],
+    );
+}
+
+/// Confirm prompt for the create-agent flow: the chosen base branch is checked
+/// out in another worktree, so offer to create a new branch on top instead.
+pub(super) fn render_confirm_create_branch_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+    let p = &app.palette;
+    let base = app
+        .control
+        .create_base_branch
+        .clone()
+        .unwrap_or_else(|| "?".to_string());
+
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 60, 6, p) else {
+        return;
+    };
+    if inner.height < 2 {
+        return;
+    }
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("Branch “{base}” is checked out elsewhere. Create a new branch on top instead?"),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "y new branch · n cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        rows[1],
     );
 }
 

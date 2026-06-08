@@ -326,7 +326,6 @@ impl AppState {
             KeyCode::Char('q') if cmd => self.should_quit = true,
             KeyCode::Char(',') if cmd => self.mode = Mode::Settings,
             KeyCode::Char('?') if cmd => self.mode = Mode::KeybindHelp,
-            KeyCode::Char('n') if cmd => self.request_home_new_agent(),
             // `r` renames the selected agent in the Agents pane. (Review now
             // lives only behind alt+r in Main, handled at the App level.)
             KeyCode::Char('r') if cmd && self.control.focus == FocusPane::Agents => {
@@ -433,8 +432,9 @@ impl AppState {
     fn home_activate(&mut self) {
         match self.control.focus {
             FocusPane::Agents => self.home_focus_selected_agent_workspace(),
-            // Control activation (expand repo actions) and Main are no-ops for now.
-            FocusPane::Control | FocusPane::Main => {}
+            // Enter on a repo opens the Graphite branch picker to create an agent.
+            FocusPane::Control => self.open_create_agent_branch_picker(),
+            FocusPane::Main => {}
         }
     }
 
@@ -464,18 +464,9 @@ impl AppState {
 
     // --- command stubs wired in later phases -------------------------------
 
-    fn request_home_new_agent(&mut self) {
-        // Open the create-agent form for the selected repository.
-        if self.control.selected_repository().is_some() {
-            self.name_input.clear();
-            self.name_input_replace_on_type = false;
-            self.mode = Mode::CreateAgent;
-        }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn request_home_review(&mut self) {
-        // Open the branch picker for the selected repository.
+    /// Open the Graphite branch picker for the selected repository. This is the
+    /// entry point for creating an agent: pick a base branch, then name it.
+    fn open_create_agent_branch_picker(&mut self) {
         if let Some(repo) = self.control.selected_repository().cloned() {
             let branches = crate::workspace::list_review_branches(&repo.root);
             self.control.review = Some(ReviewState {
@@ -656,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_n_opens_create_agent_form_when_repo_selected() {
+    fn enter_on_repo_opens_branch_picker() {
         let mut state = AppState::test_new();
         state.mode = Mode::Home;
         state.control.repos = vec![crate::workspace::Repository {
@@ -666,14 +657,23 @@ mod tests {
         }];
         state.control.focus = FocusPane::Control;
 
-        assert!(state.apply_home_key(alt('n')));
-        assert_eq!(state.mode, Mode::CreateAgent);
+        // Enter on a selected repo opens the Graphite branch picker.
+        assert!(state.apply_home_key(plain(KeyCode::Enter)));
+        assert_eq!(state.mode, Mode::Review);
+        assert!(state.control.review.is_some());
     }
 
     #[test]
-    fn alt_n_is_noop_without_repos() {
+    fn alt_n_is_no_longer_a_create_shortcut() {
         let mut state = AppState::test_new();
         state.mode = Mode::Home;
+        state.control.repos = vec![crate::workspace::Repository {
+            key: "a".into(),
+            root: "/a".into(),
+            label: "a".into(),
+        }];
+        state.control.focus = FocusPane::Control;
+        // alt+n is no longer bound; it must not open the create form.
         state.apply_home_key(alt('n'));
         assert_eq!(state.mode, Mode::Home);
     }
@@ -734,9 +734,9 @@ mod tests {
         }];
         state.control.focus = FocusPane::Control;
 
-        // Review is no longer launched from a Control keybinding (alt+r toggles
-        // the in-worktree review row in Main); the picker itself still works.
-        state.request_home_review();
+        // Enter on a Control repo opens the branch picker (the create-agent
+        // entry point); the picker itself still works for selection/clamping.
+        assert!(state.apply_home_key(plain(KeyCode::Enter)));
         assert_eq!(state.mode, Mode::Review);
         assert!(state.control.review.is_some());
 
@@ -813,6 +813,98 @@ mod tests {
         assert_eq!(app.state.mode, Mode::Review);
     }
 
+    fn app_with_picker(selected: usize) -> App {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::Review;
+        app.state.control.review = Some(ReviewState {
+            repo: crate::workspace::Repository {
+                key: "a".into(),
+                root: "/a".into(),
+                label: "a".into(),
+            },
+            branches: vec![
+                crate::workspace::Branch {
+                    name: "main".into(),
+                    is_current: true,
+                    is_remote: false,
+                    graph_prefix: String::new(),
+                },
+                crate::workspace::Branch {
+                    name: "feat".into(),
+                    is_current: false,
+                    is_remote: false,
+                    graph_prefix: String::new(),
+                },
+            ],
+            selected,
+            scroll: 0,
+        });
+        app
+    }
+
+    #[test]
+    fn picker_enter_opens_name_form_with_existing_branch() {
+        let mut app = app_with_picker(1);
+        app.handle_review_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::CreateAgent);
+        assert_eq!(
+            app.state.control.create_base_branch.as_deref(),
+            Some("feat")
+        );
+        assert!(!app.state.control.create_new_branch);
+    }
+
+    #[test]
+    fn picker_alt_enter_opens_name_form_with_new_branch() {
+        let mut app = app_with_picker(0);
+        app.handle_review_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(app.state.mode, Mode::CreateAgent);
+        assert_eq!(
+            app.state.control.create_base_branch.as_deref(),
+            Some("main")
+        );
+        assert!(app.state.control.create_new_branch);
+    }
+
+    #[test]
+    fn space_toggles_new_branch_without_typing_into_name() {
+        let mut app = app_for_mouse_test();
+        app.state.mode = Mode::CreateAgent;
+        app.state.name_input = "agent".to_string();
+        app.state.control.create_new_branch = false;
+
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty());
+        app.handle_create_agent_key(space);
+        assert!(app.state.control.create_new_branch);
+        // The space must not be appended to the name.
+        assert_eq!(app.state.name_input, "agent");
+
+        // Toggling again flips it back, still leaving the name untouched.
+        app.handle_create_agent_key(space);
+        assert!(!app.state.control.create_new_branch);
+        assert_eq!(app.state.name_input, "agent");
+    }
+
+    #[test]
+    fn confirm_create_branch_yes_sets_new_branch_flag() {
+        // The confirm prompt's "yes" path flips the new-branch flag before
+        // retrying. We only assert the flag toggle, since the retried
+        // `submit_create_agent` would shell out to git (covered elsewhere).
+        let mut app = app_with_picker(1);
+        app.handle_review_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(!app.state.control.create_new_branch);
+        app.state.mode = Mode::ConfirmCreateBranch;
+
+        // 'n' cancels back to Home and clears the stash.
+        app.handle_confirm_create_branch_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::empty(),
+        ));
+        assert_eq!(app.state.mode, Mode::Home);
+        assert!(app.state.control.create_base_branch.is_none());
+        assert!(!app.state.control.create_new_branch);
+    }
+
     #[test]
     fn r_renames_in_agents_pane_and_is_inert_in_control_pane() {
         let mut state = AppState::test_new();
@@ -863,15 +955,15 @@ mod tests {
             label: "a".into(),
         }];
 
-        // Plain `n` in the Control pane opens the create form.
+        // Plain `?` in the Control pane fires the command (opens keybind help).
         state.control.focus = FocusPane::Control;
-        assert!(state.apply_home_key(plain(KeyCode::Char('n'))));
-        assert_eq!(state.mode, Mode::CreateAgent);
+        assert!(state.apply_home_key(plain(KeyCode::Char('?'))));
+        assert_eq!(state.mode, Mode::KeybindHelp);
 
         // With Main focused, the same plain key is left for the agent pane.
         state.mode = Mode::Home;
         state.control.focus = FocusPane::Main;
-        assert!(!state.apply_home_key(plain(KeyCode::Char('n'))));
+        assert!(!state.apply_home_key(plain(KeyCode::Char('?'))));
         assert_eq!(state.mode, Mode::Home);
     }
 

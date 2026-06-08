@@ -156,12 +156,12 @@ pub(crate) fn build_worktree_add_new_branch_command(
     }
 }
 
-/// `git -C <repo_root> worktree add --detach <path> <committish>` — a detached
-/// checkout used for review, so it never disturbs branch-bearing worktrees.
-pub(crate) fn build_worktree_add_detached_command(
+/// `git -C <repo_root> worktree add <path> <branch>` — check out an existing
+/// branch into a new linked worktree (no `-b`, so the branch must already exist).
+pub(crate) fn build_worktree_add_existing_branch_command(
     repo_root: &Path,
     path: &Path,
-    committish: &str,
+    branch: &str,
 ) -> WorktreeCommand {
     WorktreeCommand {
         program: "git".to_string(),
@@ -170,29 +170,20 @@ pub(crate) fn build_worktree_add_detached_command(
             repo_root.display().to_string(),
             "worktree".to_string(),
             "add".to_string(),
-            "--detach".to_string(),
             path.display().to_string(),
-            committish.to_string(),
+            branch.to_string(),
         ],
     }
 }
 
-/// `git -C <worktree> checkout --detach <committish>` — re-point an existing
-/// review worktree at another branch without moving any branch ref.
-pub(crate) fn build_checkout_detached_command(
-    worktree: &Path,
-    committish: &str,
-) -> WorktreeCommand {
-    WorktreeCommand {
-        program: "git".to_string(),
-        args: vec![
-            "-C".to_string(),
-            worktree.display().to_string(),
-            "checkout".to_string(),
-            "--detach".to_string(),
-            committish.to_string(),
-        ],
-    }
+/// True when a `git worktree add` failure is because the requested branch is
+/// already checked out in another worktree (git refuses to check the same
+/// branch out twice). Matches the several phrasings git uses across versions.
+pub(crate) fn is_branch_already_checked_out_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("already used by worktree")
+        || lower.contains("is already checked out")
+        || lower.contains("already checked out")
 }
 
 pub(crate) fn run_worktree_command(command: &WorktreeCommand) -> Result<(), String> {
@@ -407,6 +398,46 @@ prunable stale
             "issue-137-worktree-spaces"
         );
         assert_eq!(branch_to_path_slug("///"), "worktree");
+    }
+
+    #[test]
+    fn add_existing_branch_command_omits_b_flag() {
+        let command = build_worktree_add_existing_branch_command(
+            Path::new("/repo"),
+            Path::new("/wt/foo"),
+            "feature",
+        );
+        assert_eq!(command.program, "git");
+        assert_eq!(
+            command.args,
+            vec![
+                "-C".to_string(),
+                "/repo".to_string(),
+                "worktree".to_string(),
+                "add".to_string(),
+                "/wt/foo".to_string(),
+                "feature".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn detects_branch_already_checked_out_errors() {
+        // The several phrasings git emits across versions.
+        assert!(is_branch_already_checked_out_error(
+            "fatal: 'feature' is already checked out at '/repo/wt'"
+        ));
+        assert!(is_branch_already_checked_out_error(
+            "fatal: 'feature' is already used by worktree at '/repo/wt'"
+        ));
+        assert!(is_branch_already_checked_out_error(
+            "Branch already checked out somewhere"
+        ));
+        // Unrelated errors must not match.
+        assert!(!is_branch_already_checked_out_error(
+            "fatal: invalid reference: feature"
+        ));
+        assert!(!is_branch_already_checked_out_error(""));
     }
 
     #[test]

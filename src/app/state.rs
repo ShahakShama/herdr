@@ -716,6 +716,9 @@ pub enum Mode {
     CreateAgent,
     /// Confirm killing the selected agent.
     ConfirmKill,
+    /// Confirm creating a new branch when the chosen base is checked out
+    /// elsewhere (the create-agent flow's "already checked out" fallback).
+    ConfirmCreateBranch,
     /// Rename the selected agent (and move its worktree directory to match).
     RenameAgent,
     /// Review: branch picker for the selected repo (control half → review half).
@@ -743,6 +746,7 @@ impl Mode {
             Mode::Home
                 | Mode::CreateAgent
                 | Mode::ConfirmKill
+                | Mode::ConfirmCreateBranch
                 | Mode::RenameAgent
                 | Mode::Review
         )
@@ -834,6 +838,11 @@ pub struct ControlState {
     pub last_left: LeftHalf,
     /// Active review branch-picker, when in [`Mode::Review`].
     pub review: Option<ReviewState>,
+    /// Base branch chosen in the branch picker for the create-agent flow.
+    pub create_base_branch: Option<String>,
+    /// Whether the create-agent flow should create a new branch on top of the
+    /// chosen base (vs. checking out the existing base branch).
+    pub create_new_branch: bool,
 }
 
 impl ControlState {

@@ -232,6 +232,9 @@ pub fn render_with_runtime_registry(
         Mode::CreateAgent => control::render_create_agent_overlay(app, frame, frame.area()),
         Mode::RenameAgent => control::render_rename_agent_overlay(app, frame, frame.area()),
         Mode::ConfirmKill => control::render_confirm_kill_overlay(app, frame, frame.area()),
+        Mode::ConfirmCreateBranch => {
+            control::render_confirm_create_branch_overlay(app, frame, frame.area())
+        }
         Mode::Home | Mode::Review => {}
     }
 }

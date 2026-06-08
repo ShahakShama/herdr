@@ -412,6 +412,15 @@ impl App {
             KeyCode::Backspace => {
                 self.state.name_input.pop();
             }
+            // Space toggles the "create a new branch?" checkbox rather than
+            // typing into the name — it must never reach `name_input`.
+            KeyCode::Char(' ')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+            {
+                self.state.control.create_new_branch = !self.state.control.create_new_branch;
+            }
             KeyCode::Char(c)
                 if !key
                     .modifiers
@@ -440,40 +449,117 @@ impl App {
             return;
         }
 
-        let branch = format!("worktree/{}", crate::worktree::branch_to_path_slug(&name));
+        // The worktree directory name comes from the agent NAME, not the branch.
         let checkout_path = crate::worktree::default_checkout_path(
             &self.state.worktree_directory,
             &repo.label,
-            &branch,
+            &name,
         );
-        let command = crate::worktree::build_worktree_add_new_branch_command(
-            &repo.root,
-            &checkout_path,
-            &branch,
-            "HEAD",
-        );
-        if let Err(err) = crate::worktree::run_worktree_command(&command) {
-            tracing::warn!(error = %err, "create-agent worktree add failed");
-            self.state.set_home_toast("create agent failed", err);
-            self.state.mode = Mode::Home;
-            return;
+
+        // The base branch is the one picked in the branch picker. If somehow
+        // missing, fall back to a fresh branch from HEAD (the old behavior).
+        let base = self
+            .state
+            .control
+            .create_base_branch
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string());
+        let new_branch = self.state.control.create_new_branch
+            || self.state.control.create_base_branch.is_none();
+
+        if new_branch {
+            // The branch name is the worktree (agent) name verbatim.
+            let command = crate::worktree::build_worktree_add_new_branch_command(
+                &repo.root,
+                &checkout_path,
+                &name,
+                &base,
+            );
+            if let Err(err) = crate::worktree::run_worktree_command(&command) {
+                tracing::warn!(error = %err, "create-agent worktree add (new branch) failed");
+                self.state.set_home_toast("create agent failed", err);
+                self.state.mode = Mode::Home;
+                return;
+            }
+            // Best-effort: stack the new branch onto its base with Graphite so it
+            // shows up in the stack. gt has no `-C`; run it in the new worktree.
+            // Failures are intentionally ignored — the git branch is correct
+            // regardless of whether Graphite tracking succeeds.
+            self.graphite_track(&checkout_path, &base);
+        } else {
+            // Check out the existing base branch directly (no `-b`).
+            let command = crate::worktree::build_worktree_add_existing_branch_command(
+                &repo.root,
+                &checkout_path,
+                &base,
+            );
+            if let Err(err) = crate::worktree::run_worktree_command(&command) {
+                if crate::worktree::is_branch_already_checked_out_error(&err) {
+                    // The branch is live in another worktree; offer to branch off
+                    // it instead rather than surfacing a raw git error.
+                    self.state.mode = Mode::ConfirmCreateBranch;
+                    return;
+                }
+                tracing::warn!(error = %err, "create-agent worktree add (existing branch) failed");
+                self.state.set_home_toast("create agent failed", err);
+                self.state.mode = Mode::Home;
+                return;
+            }
         }
 
+        self.finish_create_agent(&repo, &checkout_path, name);
+    }
+
+    /// Best-effort `gt track --parent <base>` inside `checkout_path` so a newly
+    /// created branch stacks on top of its base. `gt` has no `-C`, so we set the
+    /// working directory; we also pass `--quiet --no-interactive` so it never
+    /// blocks on a prompt. Any failure is logged and ignored.
+    fn graphite_track(&self, checkout_path: &std::path::Path, base: &str) {
+        let result = std::process::Command::new("gt")
+            .current_dir(checkout_path)
+            .args([
+                "track",
+                "--parent",
+                base,
+                "--quiet",
+                "--no-interactive",
+            ])
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(stderr = %stderr.trim(), base, "gt track failed (ignored)");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "gt track could not be launched (ignored)");
+            }
+        }
+    }
+
+    /// Spawn the agent in the freshly-created worktree and wire up its workspace
+    /// metadata, then return to the home surface with the new agent in Main.
+    fn finish_create_agent(
+        &mut self,
+        repo: &crate::workspace::Repository,
+        checkout_path: &std::path::Path,
+        name: String,
+    ) {
         let argv: Vec<String> = CREATE_AGENT_DEFAULT_ARGV
             .iter()
             .map(|s| s.to_string())
             .collect();
         let (rows, cols) = self.state.estimate_pane_size();
-        match self.spawn_agent_workspace(checkout_path.clone(), rows, cols, &argv, true) {
+        match self.spawn_agent_workspace(checkout_path.to_path_buf(), rows, cols, &argv, true) {
             Ok((ws_idx, _tab, pane_id)) => {
                 if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
                     ws.set_custom_name(name.clone());
-                    if let Some(meta) = crate::workspace::git_space_metadata(&checkout_path) {
+                    if let Some(meta) = crate::workspace::git_space_metadata(checkout_path) {
                         ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
                             key: meta.key,
                             label: repo.label.clone(),
                             repo_root: repo.root.clone(),
-                            checkout_path: checkout_path.clone(),
+                            checkout_path: checkout_path.to_path_buf(),
                             is_linked_worktree: true,
                         });
                     }
@@ -501,8 +587,30 @@ impl App {
                 self.state.set_home_toast("create agent failed", body.message);
             }
         }
+        self.state.control.create_base_branch = None;
+        self.state.control.create_new_branch = false;
         self.state.mode = Mode::Home;
         self.state.name_input.clear();
+    }
+
+    /// Handle a key while confirming whether to create a new branch because the
+    /// chosen base branch is already checked out in another worktree.
+    pub(super) fn handle_confirm_create_branch_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                // Retry the create flow on the new-branch path.
+                self.state.control.create_new_branch = true;
+                self.submit_create_agent();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.state.control.create_base_branch = None;
+                self.state.control.create_new_branch = false;
+                self.state.name_input.clear();
+                self.state.mode = Mode::Home;
+            }
+            _ => {}
+        }
     }
 
     /// Open a plain interactive shell in the selected repository's root and
@@ -670,9 +778,37 @@ impl App {
             KeyCode::Char('h') | KeyCode::Char('l') if plain => {}
             // The picker is not a text input, so plain `p` (or alt+p) submits a PR.
             KeyCode::Char('p') => self.submit_pr_for_review(),
-            KeyCode::Enter => self.open_review_branch(),
+            // Enter picks the base branch and moves to the name form. alt+Enter
+            // does the same but pre-checks "create a new branch".
+            KeyCode::Enter => {
+                let new_branch = key.modifiers.contains(KeyModifiers::ALT);
+                self.pick_branch_for_create(new_branch);
+            }
             _ => {}
         }
+    }
+
+    /// Stash the branch selected in the picker as the create-agent base and open
+    /// the name form. `new_branch` pre-fills the "create a new branch?" checkbox.
+    fn pick_branch_for_create(&mut self, new_branch: bool) {
+        let Some(review) = self.state.control.review.as_ref() else {
+            return;
+        };
+        let Some(branch) = review.branches.get(review.selected) else {
+            return;
+        };
+        // The base must be a local branch name; strip a remote prefix if present.
+        let base = branch
+            .name
+            .rsplit_once('/')
+            .filter(|_| branch.is_remote)
+            .map(|(_, name)| name.to_string())
+            .unwrap_or_else(|| branch.name.clone());
+        self.state.control.create_base_branch = Some(base);
+        self.state.control.create_new_branch = new_branch;
+        self.state.name_input.clear();
+        self.state.name_input_replace_on_type = false;
+        self.state.mode = Mode::CreateAgent;
     }
 
     /// Submit a PR for the branch selected in the review picker.
@@ -741,74 +877,6 @@ impl App {
                     .set_home_toast("PR failed", format!("gh not available: {err}"));
             }
         }
-    }
-
-    /// Open `vimrev` on the selected branch in a per-repo detached review
-    /// worktree, diffing against the branch's Graphite parent. The dedicated
-    /// review worktree is the only checkout that ever moves, so live agent
-    /// worktrees are never disturbed.
-    fn open_review_branch(&mut self) {
-        let Some(review) = self.state.control.review.as_ref() else {
-            self.state.mode = Mode::Home;
-            return;
-        };
-        let Some(branch) = review.branches.get(review.selected) else {
-            return;
-        };
-        let repo = review.repo.clone();
-        let branch_name = branch.name.clone();
-        let review_path = self
-            .state
-            .worktree_directory
-            .join(format!("{}-review", repo.label));
-        let base = crate::workspace::review_base(&repo.root, &branch_name);
-
-        let command = if review_path.exists() {
-            crate::worktree::build_checkout_detached_command(&review_path, &branch_name)
-        } else {
-            crate::worktree::build_worktree_add_detached_command(
-                &repo.root,
-                &review_path,
-                &branch_name,
-            )
-        };
-        if let Err(err) = crate::worktree::run_worktree_command(&command) {
-            tracing::warn!(error = %err, "review worktree setup failed");
-            self.state.set_home_toast("review failed", err);
-            self.state.mode = Mode::Home;
-            self.state.control.review = None;
-            return;
-        }
-
-        // Launch the review tool through an interactive login shell so a `vimrev`
-        // shell function/alias (or a PATH binary) all resolve — a direct PTY exec
-        // would only find a PATH binary. Override the command with HERDR_REVIEW_CMD.
-        let review_cmd =
-            std::env::var("HERDR_REVIEW_CMD").unwrap_or_else(|_| "vimrev".to_string());
-        let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
-        // `default_shell` is empty by default; resolve it to $SHELL (then /bin/sh)
-        // so argv[0] is a real shell rather than "", which would make the PTY
-        // search PATH for an empty program name.
-        let shell = crate::pane::pane_shell(&self.state.default_shell);
-        let argv = vec![shell, "-ic".to_string(), command_line];
-        let (rows, cols) = self.state.estimate_pane_size();
-        match self.spawn_agent_workspace(review_path, rows, cols, &argv, true) {
-            Ok((ws_idx, _tab, _pane)) => {
-                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
-                    ws.set_custom_name(format!("review: {branch_name}"));
-                }
-                self.state.active = Some(ws_idx);
-                self.state.selected = ws_idx;
-                self.state.control.focus = crate::app::state::FocusPane::Main;
-            }
-            Err(err) => {
-                let body = self.agent_start_error_body(err);
-                tracing::warn!(error = %body.message, "review spawn failed");
-                self.state.set_home_toast("review failed", body.message);
-            }
-        }
-        self.state.mode = Mode::Home;
-        self.state.control.review = None;
     }
 
     /// Toggle the in-worktree REVIEW row of the active workspace. See

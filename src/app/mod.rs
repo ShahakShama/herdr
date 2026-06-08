@@ -1344,6 +1344,7 @@ impl App {
             Mode::CreateAgent => self.handle_create_agent_key(key_event),
             Mode::RenameAgent => self.handle_rename_agent_key(key_event),
             Mode::ConfirmKill => self.state.handle_confirm_kill_key(key_event),
+            Mode::ConfirmCreateBranch => self.handle_confirm_create_branch_key(key_event),
             Mode::Review => self.handle_review_key(key_event),
             Mode::KeybindHelp => input::handle_keybind_help_key(&mut self.state, key_event),
             Mode::Onboarding => self.handle_onboarding_key(key_event),
@@ -2419,6 +2420,10 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
+        // Keep the Control repo list empty so the post-dismiss Enter presses are
+        // inert (Enter on a selected repo would otherwise open the branch
+        // picker); this test only cares about repeat/release not leaking.
+        app.state.control.repos.clear();
         app.state.mode = Mode::ReleaseNotes;
         app.state.release_notes = Some(release_notes_state());
 
