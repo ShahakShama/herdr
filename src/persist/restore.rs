@@ -334,6 +334,8 @@ fn restore_workspace(
             next_public_pane_number,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
+            detached_review: None,
+            detached_terminal: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })
@@ -400,6 +402,7 @@ fn restore_tab(
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_role = saved_pane.map(|p| p.role).unwrap_or_default();
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -450,7 +453,9 @@ fn restore_tab(
             ) {
                 terminal.set_persisted_agent_session(session);
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane_state = PaneState::new(terminal_id);
+            pane_state.role = saved_role;
+            panes.insert(*id, pane_state);
             terminals.push(terminal);
             continue;
         }
@@ -515,7 +520,9 @@ fn restore_tab(
                 ) {
                     terminal.set_persisted_agent_session(session);
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane_state = PaneState::new(terminal_id.clone());
+                pane_state.role = saved_role;
+                panes.insert(*id, pane_state);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -1024,6 +1031,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            role: crate::pane::PaneRole::Agent,
                         },
                     )]),
                     zoomed: false,
@@ -1099,6 +1107,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            role: crate::pane::PaneRole::Agent,
                         },
                     )]),
                     zoomed: false,
@@ -1261,6 +1270,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                role: crate::pane::PaneRole::Agent,
             },
         );
         let history = SessionHistorySnapshot {

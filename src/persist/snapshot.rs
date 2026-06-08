@@ -99,6 +99,10 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Which stacked row this pane is (review/terminal/agent) so attached rows
+    /// restore in place. Detached/kept-alive rows are transient and not stored.
+    #[serde(default)]
+    pub role: crate::pane::PaneRole,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +349,7 @@ fn capture_tab(
                         }
                     })
                 });
+        let role = tab.panes.get(id).map(|pane| pane.role).unwrap_or_default();
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -353,6 +358,7 @@ fn capture_tab(
                 agent_name,
                 agent_session,
                 launch_argv,
+                role,
             },
         );
     }
@@ -589,6 +595,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                role: crate::pane::PaneRole::Agent,
             },
         );
         panes.insert(
@@ -599,6 +606,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                role: crate::pane::PaneRole::Agent,
             },
         );
 
@@ -1122,6 +1130,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                role: crate::pane::PaneRole::Agent,
             },
         );
         panes.insert(
@@ -1134,6 +1143,7 @@ mod tests {
                 agent_name: None,
                 agent_session: None,
                 launch_argv: None,
+                role: crate::pane::PaneRole::Agent,
             },
         );
 

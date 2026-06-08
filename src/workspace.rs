@@ -12,7 +12,7 @@ use crate::events::AppEvent;
 use crate::layout::PaneId;
 #[cfg(test)]
 use crate::layout::TileLayout;
-use crate::pane::PaneState;
+use crate::pane::{PaneRole, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 mod aggregate;
@@ -104,6 +104,12 @@ pub struct Workspace {
     pub(crate) next_public_pane_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Transient: the kept-alive review-row terminal when that row is detached
+    /// (toggled closed). Re-attaching reuses this terminal. Not serialized.
+    pub(crate) detached_review: Option<TerminalId>,
+    /// Transient: the kept-alive terminal-row terminal when that row is detached
+    /// (toggled closed). Re-attaching reuses this terminal. Not serialized.
+    pub(crate) detached_terminal: Option<TerminalId>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -230,6 +236,8 @@ impl Workspace {
                 next_public_pane_number: 2,
                 tabs: vec![tab],
                 active_tab: 0,
+                detached_review: None,
+                detached_terminal: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -705,6 +713,45 @@ impl Workspace {
         self.active_tab().map(|tab| tab.layout.focused())
     }
 
+    /// The pane in the active tab currently carrying `role`, if any.
+    pub fn pane_with_role(&self, role: PaneRole) -> Option<PaneId> {
+        let tab = self.active_tab()?;
+        tab.layout
+            .pane_ids()
+            .into_iter()
+            .find(|id| tab.panes.get(id).map(|p| p.role) == Some(role))
+    }
+
+    /// The agent (root) pane of the active tab — always the bottom row.
+    pub fn agent_pane(&self) -> Option<PaneId> {
+        self.active_tab().map(|tab| tab.root_pane)
+    }
+
+    /// The pane (in any tab) attached to `tid`, if any.
+    pub fn pane_for_terminal(&self, tid: &TerminalId) -> Option<PaneId> {
+        self.tabs.iter().find_map(|tab| {
+            tab.panes
+                .iter()
+                .find(|(_, pane)| &pane.attached_terminal_id == tid)
+                .map(|(id, _)| *id)
+        })
+    }
+
+    /// Re-attach an existing (kept-alive) terminal as a new row stacked on top
+    /// of `target` within `target`'s tab, tagged with `role`. Returns the new
+    /// pane id, or `None` if `target` is not found.
+    pub fn reattach_row(
+        &mut self,
+        target: PaneId,
+        terminal_id: TerminalId,
+        role: PaneRole,
+    ) -> Option<PaneId> {
+        let tab_idx = self.find_tab_index_for_pane(target)?;
+        let new = self.tabs[tab_idx].split_attach_above(target, terminal_id, role);
+        self.register_new_pane(new);
+        Some(new)
+    }
+
     pub fn close_pane(&mut self, pane_id: PaneId) -> bool {
         let tab_idx = match self.find_tab_index_for_pane(pane_id) {
             Some(idx) => idx,
@@ -802,6 +849,8 @@ impl Workspace {
             next_public_pane_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            detached_review: None,
+            detached_terminal: None,
             test_runtimes: HashMap::new(),
         }
     }
@@ -846,7 +895,91 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::layout::Rect;
+
     use super::*;
+
+    /// Top→bottom pane ids of the active tab, ordered by rendered y.
+    fn rows_top_to_bottom(ws: &Workspace) -> Vec<(PaneId, PaneRole)> {
+        let tab = ws.active_tab().unwrap();
+        let mut infos = tab.layout.panes(Rect::new(0, 0, 80, 30));
+        infos.sort_by_key(|info| info.rect.y);
+        infos
+            .into_iter()
+            .map(|info| (info.id, tab.panes.get(&info.id).unwrap().role))
+            .collect()
+    }
+
+    #[test]
+    fn reattach_review_lands_on_top_of_agent() {
+        let mut ws = Workspace::test_new("test");
+        let agent = ws.agent_pane().unwrap();
+        let review_tid = TerminalId::alloc();
+
+        let review = ws
+            .reattach_row(agent, review_tid, PaneRole::Review)
+            .expect("review pane");
+
+        let rows = rows_top_to_bottom(&ws);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (review, PaneRole::Review), "review on top");
+        assert_eq!(rows[1], (agent, PaneRole::Agent), "agent at bottom");
+        // Focus lands on the freshly attached row.
+        assert_eq!(ws.focused_pane_id(), Some(review));
+        assert_eq!(ws.pane_with_role(PaneRole::Review), Some(review));
+    }
+
+    #[test]
+    fn reattach_terminal_then_review_orders_review_terminal_agent() {
+        let mut ws = Workspace::test_new("test");
+        let agent = ws.agent_pane().unwrap();
+
+        // Terminal splits the agent (root) pane and sits above it.
+        let terminal = ws
+            .reattach_row(agent, TerminalId::alloc(), PaneRole::Terminal)
+            .expect("terminal pane");
+        // Review lands above the terminal row.
+        let review_target = ws.pane_with_role(PaneRole::Terminal).unwrap();
+        let review = ws
+            .reattach_row(review_target, TerminalId::alloc(), PaneRole::Review)
+            .expect("review pane");
+
+        let rows = rows_top_to_bottom(&ws);
+        assert_eq!(
+            rows,
+            vec![
+                (review, PaneRole::Review),
+                (terminal, PaneRole::Terminal),
+                (agent, PaneRole::Agent),
+            ]
+        );
+    }
+
+    #[test]
+    fn detached_review_keeps_terminal_for_reattach() {
+        let mut ws = Workspace::test_new("test");
+        let agent = ws.agent_pane().unwrap();
+        let review_tid = TerminalId::alloc();
+        let review = ws
+            .reattach_row(agent, review_tid.clone(), PaneRole::Review)
+            .unwrap();
+        assert_eq!(ws.terminal_id(review).cloned(), Some(review_tid.clone()));
+
+        // Detaching keeps the terminal id available; the pane is gone.
+        let detached = ws.terminal_id(review).cloned();
+        ws.remove_pane(review);
+        assert!(ws.pane_with_role(PaneRole::Review).is_none());
+        assert_eq!(detached, Some(review_tid.clone()));
+
+        // Re-attaching the same terminal id restores the row on top.
+        let reattached = ws
+            .reattach_row(agent, review_tid.clone(), PaneRole::Review)
+            .unwrap();
+        assert_eq!(ws.terminal_id(reattached).cloned(), Some(review_tid));
+        let rows = rows_top_to_bottom(&ws);
+        assert_eq!(rows[0].1, PaneRole::Review);
+        assert_eq!(rows[1].0, agent);
+    }
 
     #[test]
     fn workspace_identity_follows_first_tab_root_pane_cwd() {

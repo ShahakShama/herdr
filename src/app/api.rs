@@ -224,9 +224,11 @@ impl App {
     }
 
     /// Move herdr's pane focus in response to a pane (vim) reporting it had no
-    /// window to move to. Only the focused Main pane can trigger this, and only
-    /// the leftward signal maps to a herdr neighbour (the sidebar sits to the
-    /// left of Main). Returns whether focus actually changed.
+    /// window to move to. Only the focused Main pane can trigger this. Up/Down/
+    /// Right move between the stacked rows (review/terminal/agent) of the active
+    /// workspace; Left moves to a neighbouring row when one exists and otherwise
+    /// falls back to the sidebar (which sits left of Main). Returns whether focus
+    /// actually changed.
     fn apply_pane_focus_signal(
         &mut self,
         pane_id: crate::layout::PaneId,
@@ -234,11 +236,9 @@ impl App {
     ) -> bool {
         use crate::app::state::FocusPane;
         use crate::events::PaneFocusDirection;
+        use crate::layout::NavDirection;
 
-        if self.state.mode != Mode::Home
-            || self.state.control.focus != FocusPane::Main
-            || direction != PaneFocusDirection::Left
-        {
+        if self.state.mode != Mode::Home || self.state.control.focus != FocusPane::Main {
             return false;
         }
         let focused_pane = self
@@ -249,8 +249,23 @@ impl App {
         if focused_pane != Some(pane_id) {
             return false;
         }
-        self.state.home_focus_left();
-        true
+
+        let nav = match direction {
+            PaneFocusDirection::Left => NavDirection::Left,
+            PaneFocusDirection::Down => NavDirection::Down,
+            PaneFocusDirection::Up => NavDirection::Up,
+            PaneFocusDirection::Right => NavDirection::Right,
+        };
+        if self.state.focus_main_direction(nav) {
+            return true;
+        }
+        // No neighbouring row that way. Leaving the leftmost window returns to the
+        // sidebar; other edges have no herdr neighbour, so do nothing.
+        if direction == PaneFocusDirection::Left {
+            self.state.home_focus_left();
+            return true;
+        }
+        false
     }
 
     pub(crate) fn refresh_new_herdr_toast_context_for_update(

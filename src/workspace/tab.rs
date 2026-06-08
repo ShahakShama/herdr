@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
 use crate::layout::{PaneId, TileLayout};
-use crate::pane::PaneState;
+use crate::pane::{PaneRole, PaneState};
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
 
 pub(crate) type DetachedPane = (PaneId, TerminalId);
@@ -339,6 +339,29 @@ impl Tab {
             terminal,
             runtime,
         })
+    }
+
+    /// Split `target` and place the NEW pane on TOP of it, attaching the given
+    /// existing `terminal_id` (no spawn) with `role`. Focus lands on the new
+    /// pane. Returns the new pane id.
+    ///
+    /// `split_focused`/`split_at` make the original pane `first` (top) and the
+    /// new pane `second` (bottom) for a vertical split, so we `swap_panes` to put
+    /// the new row above the target.
+    pub fn split_attach_above(
+        &mut self,
+        target: PaneId,
+        terminal_id: TerminalId,
+        role: PaneRole,
+    ) -> PaneId {
+        self.layout.focus_pane(target);
+        let new = self.layout.split_focused(Direction::Vertical);
+        self.layout.swap_panes(target, new);
+        let mut ps = PaneState::new(terminal_id);
+        ps.role = role;
+        self.panes.insert(new, ps);
+        self.zoomed = false;
+        new
     }
 
     pub fn close_focused(&mut self) -> Option<DetachedPane> {

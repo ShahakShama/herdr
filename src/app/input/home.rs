@@ -69,6 +69,24 @@ impl App {
             return false;
         }
 
+        // alt+r / alt+t toggle the in-worktree review / terminal rows of the
+        // active workspace when Main is focused. These spawn/attach panes, so
+        // they run at the App level. Only fire on the Main surface so the review
+        // picker (`r` in Control) and other surfaces are unaffected.
+        if self.state.main_focused() && event.modifiers.contains(KeyModifiers::ALT) {
+            match event.code {
+                KeyCode::Char('r') => {
+                    self.toggle_review_row();
+                    return false;
+                }
+                KeyCode::Char('t') => {
+                    self.toggle_terminal_row();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         // With vim focused in Main, Alt+h/j/k/l drive vim's window navigation
         // rather than herdr's pane focus. vim signals back (an OSC our vimrc
         // emits, handled as AppEvent::PaneFocusSignal) when it has no window in
@@ -271,6 +289,32 @@ impl AppState {
         let in_list = self.control.focus != FocusPane::Main;
         let cmd = alt || in_list;
 
+        // With Main focused, alt+h/j/k/l first try to move focus between the
+        // stacked rows (review/terminal/agent) of the active workspace. Only a
+        // miss falls through to the sidebar arms below (and, for Left, to the
+        // sidebar). This runs ahead of the generic directional arms, which would
+        // otherwise jump straight to a sidebar pane regardless of focus.
+        if alt && self.control.focus == FocusPane::Main {
+            if let Some(nav) = match event.code {
+                KeyCode::Char('h') => Some(crate::layout::NavDirection::Left),
+                KeyCode::Char('j') => Some(crate::layout::NavDirection::Down),
+                KeyCode::Char('k') => Some(crate::layout::NavDirection::Up),
+                KeyCode::Char('l') => Some(crate::layout::NavDirection::Right),
+                _ => None,
+            } {
+                if self.focus_main_direction(nav) {
+                    return true;
+                }
+                // No neighbouring row in that direction. Left falls back to the
+                // sidebar; the others stay put (no sidebar lives down/up/right
+                // of Main).
+                if matches!(event.code, KeyCode::Char('h')) {
+                    self.home_focus_left();
+                }
+                return true;
+            }
+        }
+
         match event.code {
             // Directional pane focus — alt so it also works while typing in Main.
             KeyCode::Char('h') if alt => self.home_focus_left(),
@@ -283,12 +327,11 @@ impl AppState {
             KeyCode::Char(',') if cmd => self.mode = Mode::Settings,
             KeyCode::Char('?') if cmd => self.mode = Mode::KeybindHelp,
             KeyCode::Char('n') if cmd => self.request_home_new_agent(),
-            // `r` renames the selected agent in the Agents pane, but opens the
-            // review branch-picker for the selected repo in the Control pane.
+            // `r` renames the selected agent in the Agents pane. (Review now
+            // lives only behind alt+r in Main, handled at the App level.)
             KeyCode::Char('r') if cmd && self.control.focus == FocusPane::Agents => {
                 self.request_home_rename_agent();
             }
-            KeyCode::Char('r') if cmd => self.request_home_review(),
             KeyCode::Char('x') if cmd => self.request_home_kill_agent(),
             KeyCode::Char('p') if cmd => self.request_home_submit_pr(),
             KeyCode::Char(c) if cmd && c.is_ascii_digit() && c != '0' => {
@@ -320,6 +363,44 @@ impl AppState {
             FocusPane::Agents => self.control.last_left = LeftHalf::Agents,
             FocusPane::Main => {}
         }
+    }
+
+    /// Move focus to the neighbouring stacked row (review/terminal/agent) of the
+    /// active workspace in `nav` direction, using the rendered pane geometry.
+    /// Returns `true` when focus actually moved.
+    pub(crate) fn focus_main_direction(&mut self, nav: crate::layout::NavDirection) -> bool {
+        let Some(ws_idx) = self.active else {
+            return false;
+        };
+        let Some(focused_id) = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return false;
+        };
+        let Some(focused_info) = self
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == focused_id)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(target) =
+            crate::layout::find_in_direction(&focused_info, nav, &self.view.pane_infos)
+        else {
+            return false;
+        };
+        if let Some(ws) = self.workspaces.get_mut(ws_idx) {
+            if let Some(tab_idx) = ws.find_tab_index_for_pane(target) {
+                ws.tabs[tab_idx].layout.focus_pane(target);
+                self.mark_session_dirty();
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) fn home_focus_left(&mut self) {
@@ -392,6 +473,7 @@ impl AppState {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn request_home_review(&mut self) {
         // Open the branch picker for the selected repository.
         if let Some(repo) = self.control.selected_repository().cloned() {
@@ -642,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn alt_r_opens_review_picker_and_arrows_clamp() {
+    fn review_picker_opens_and_arrows_clamp() {
         let mut state = AppState::test_new();
         state.mode = Mode::Home;
         state.control.repos = vec![crate::workspace::Repository {
@@ -652,7 +734,9 @@ mod tests {
         }];
         state.control.focus = FocusPane::Control;
 
-        assert!(state.apply_home_key(alt('r')));
+        // Review is no longer launched from a Control keybinding (alt+r toggles
+        // the in-worktree review row in Main); the picker itself still works.
+        state.request_home_review();
         assert_eq!(state.mode, Mode::Review);
         assert!(state.control.review.is_some());
 
@@ -730,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn r_renames_in_agents_pane_but_reviews_in_control_pane() {
+    fn r_renames_in_agents_pane_and_is_inert_in_control_pane() {
         let mut state = AppState::test_new();
         state.mode = Mode::Home;
         state.control.repos = vec![crate::workspace::Repository {
@@ -739,10 +823,11 @@ mod tests {
             label: "a".into(),
         }];
 
-        // In the Control pane, `r` opens the review picker.
+        // In the Control pane, `r` no longer opens the review picker — it is
+        // inert there now (review moved to alt+r in Main).
         state.control.focus = FocusPane::Control;
-        assert!(state.apply_home_key(alt('r')));
-        assert_eq!(state.mode, Mode::Review);
+        assert!(!state.apply_home_key(alt('r')));
+        assert_eq!(state.mode, Mode::Home);
 
         // Set up a single agent so the Agents pane has a selection to rename.
         state.mode = Mode::Home;
@@ -782,11 +867,6 @@ mod tests {
         state.control.focus = FocusPane::Control;
         assert!(state.apply_home_key(plain(KeyCode::Char('n'))));
         assert_eq!(state.mode, Mode::CreateAgent);
-
-        // Plain `r` in the Control pane opens the review picker.
-        state.mode = Mode::Home;
-        assert!(state.apply_home_key(plain(KeyCode::Char('r'))));
-        assert_eq!(state.mode, Mode::Review);
 
         // With Main focused, the same plain key is left for the agent pane.
         state.mode = Mode::Home;
@@ -946,5 +1026,140 @@ mod tests {
         assert!(ScrollChord::from_key(plain(KeyCode::PageUp)).is_none());
         assert!(ScrollChord::from_key(ctrl_shift(KeyCode::Up)).is_some());
         assert!(ScrollChord::from_key(shift(KeyCode::PageUp)).is_some());
+    }
+
+    // --- In-worktree review/terminal rows (alt+r / alt+t) -----------------
+
+    use crate::pane::PaneRole;
+    use crate::terminal::{TerminalId, TerminalState};
+
+    /// Build an App with one active workspace whose review row is already
+    /// attached (terminal present in `state.terminals`), Main focused. Returns
+    /// `(app, ws_idx, agent_pane, review_pane, review_terminal_id)`.
+    fn app_with_attached_review() -> (
+        App,
+        usize,
+        crate::layout::PaneId,
+        crate::layout::PaneId,
+        TerminalId,
+    ) {
+        let mut app = app_for_mouse_test();
+        let mut ws = crate::workspace::Workspace::test_new("agent");
+        let agent = ws.agent_pane().unwrap();
+        let review_tid = TerminalId::alloc();
+        let review = ws
+            .reattach_row(agent, review_tid.clone(), PaneRole::Review)
+            .unwrap();
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        // Give the agent pane an agent name so it shows in the agents list.
+        let agent_tid = app.state.workspaces[0]
+            .terminal_id(agent)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .entry(agent_tid.clone())
+            .or_insert_with(|| TerminalState::new(agent_tid.clone(), "/tmp".into()))
+            .set_agent_name("agent0".into());
+        app.state.mode = Mode::Home;
+        app.state.control.focus = FocusPane::Main;
+        (app, 0, agent, review, review_tid)
+    }
+
+    #[test]
+    fn toggling_review_closed_detaches_but_keeps_terminal_alive() {
+        let (mut app, ws_idx, _agent, review, review_tid) = app_with_attached_review();
+        assert_eq!(
+            app.state.workspaces[ws_idx].pane_with_role(PaneRole::Review),
+            Some(review)
+        );
+
+        // alt+r closes the row: pane gone, terminal stashed and still alive.
+        assert!(!app.dispatch_home_key(alt('r')));
+        assert!(app.state.workspaces[ws_idx]
+            .pane_with_role(PaneRole::Review)
+            .is_none());
+        assert!(app.state.terminals.contains_key(&review_tid));
+        assert_eq!(
+            app.state.workspaces[ws_idx].detached_review,
+            Some(review_tid.clone())
+        );
+
+        // alt+r again re-attaches the SAME terminal id on top of the agent.
+        assert!(!app.dispatch_home_key(alt('r')));
+        let reattached = app.state.workspaces[ws_idx]
+            .pane_with_role(PaneRole::Review)
+            .expect("review reattached");
+        assert_eq!(
+            app.state.workspaces[ws_idx].terminal_id(reattached).cloned(),
+            Some(review_tid)
+        );
+        assert!(app.state.workspaces[ws_idx].detached_review.is_none());
+    }
+
+    #[test]
+    fn review_pane_is_not_listed_as_an_agent() {
+        let (app, _ws_idx, _agent, _review, _tid) = app_with_attached_review();
+        let entries = crate::ui::agent_panel_entries_all(&app.state);
+        // Only the agent row counts; the review row is excluded.
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn alt_r_alt_t_are_noops_without_active_workspace() {
+        let mut app = app_for_mouse_test();
+        app.state.active = None;
+        app.state.control.focus = FocusPane::Main;
+        // No panic, no toast, nothing to toggle.
+        assert!(!app.dispatch_home_key(alt('r')));
+        assert!(!app.dispatch_home_key(alt('t')));
+        assert!(app.state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn alt_r_is_noop_when_main_not_focused() {
+        let (mut app, ws_idx, _agent, review, _tid) = app_with_attached_review();
+        app.state.control.focus = FocusPane::Control;
+        // With Control focused, alt+r does not toggle the review row.
+        app.dispatch_home_key(alt('r'));
+        assert_eq!(
+            app.state.workspaces[ws_idx].pane_with_role(PaneRole::Review),
+            Some(review),
+            "review row untouched when Main is not focused"
+        );
+    }
+
+    #[test]
+    fn alt_hjkl_moves_focus_between_stacked_rows_and_left_edge_returns_to_sidebar() {
+        let (mut app, ws_idx, agent, review, _tid) = app_with_attached_review();
+        // Render the two stacked rows so focus nav has geometry to work with.
+        app.state.view.pane_infos = app.state.workspaces[ws_idx].active_tab().unwrap()
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 80, 30));
+        // Focus starts on the freshly attached review row (top).
+        app.state.workspaces[ws_idx].tabs[0]
+            .layout
+            .focus_pane(review);
+
+        // alt+j moves DOWN to the agent row.
+        assert!(app.state.apply_home_key(alt('j')));
+        assert_eq!(
+            app.state.workspaces[ws_idx].focused_pane_id(),
+            Some(agent)
+        );
+
+        // alt+k moves back UP to the review row.
+        assert!(app.state.apply_home_key(alt('k')));
+        assert_eq!(
+            app.state.workspaces[ws_idx].focused_pane_id(),
+            Some(review)
+        );
+
+        // alt+h at the left edge (no row to the left) returns to the sidebar.
+        assert!(app.state.apply_home_key(alt('h')));
+        assert_ne!(app.state.control.focus, FocusPane::Main);
     }
 }

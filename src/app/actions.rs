@@ -567,13 +567,19 @@ impl AppState {
         &self,
         ws_idx: usize,
     ) -> Vec<crate::terminal::TerminalId> {
-        self.workspaces
-            .get(ws_idx)
-            .into_iter()
-            .flat_map(|ws| &ws.tabs)
+        let Some(ws) = self.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<_> = ws
+            .tabs
+            .iter()
             .flat_map(|tab| tab.panes.values())
             .map(|pane| pane.attached_terminal_id.clone())
-            .collect()
+            .collect();
+        // Detached (kept-alive) review/terminal rows must also be torn down.
+        ids.extend(ws.detached_review.clone());
+        ids.extend(ws.detached_terminal.clone());
+        ids
     }
 
     pub(crate) fn terminal_ids_for_tab(

@@ -39,6 +39,10 @@ impl Tab {
             .iter()
             .filter_map(|id| {
                 let pane = self.panes.get(id)?;
+                // Review/terminal rows are not agents — keep them out of the list.
+                if pane.role != crate::pane::PaneRole::Agent {
+                    return None;
+                }
                 let terminal = terminals.get(&pane.attached_terminal_id)?;
                 let fallback_agent_label = terminal
                     .agent_name

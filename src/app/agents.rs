@@ -811,6 +811,209 @@ impl App {
         self.state.control.review = None;
     }
 
+    /// Toggle the in-worktree REVIEW row of the active workspace. See
+    /// [`Self::toggle_row`].
+    pub(crate) fn toggle_review_row(&mut self) {
+        self.toggle_row(crate::pane::PaneRole::Review);
+    }
+
+    /// Toggle the in-worktree TERMINAL row of the active workspace. See
+    /// [`Self::toggle_row`].
+    pub(crate) fn toggle_terminal_row(&mut self) {
+        self.toggle_row(crate::pane::PaneRole::Terminal);
+    }
+
+    /// Toggle a stacked review/terminal row inside the active workspace (the
+    /// agent's own worktree).
+    ///
+    /// - If the row is currently attached: DETACH the pane (remove from layout,
+    ///   keep its terminal alive in the registries) and stash its terminal id so
+    ///   a later re-open re-attaches the same terminal. Never kills it.
+    /// - Else open it: re-attach a previously-detached terminal when present,
+    ///   otherwise spawn a fresh one (review command / plain shell) in the
+    ///   agent's worktree. New rows land on TOP of their split target.
+    fn toggle_row(&mut self, role: crate::pane::PaneRole) {
+        use crate::pane::PaneRole;
+
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+
+        // Currently attached? -> detach (keep the terminal alive).
+        let attached = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.pane_with_role(role));
+        if let Some(pane_id) = attached {
+            let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                return;
+            };
+            let terminal_id = ws.terminal_id(pane_id).cloned();
+            ws.remove_pane(pane_id);
+            match role {
+                PaneRole::Review => ws.detached_review = terminal_id,
+                PaneRole::Terminal => ws.detached_terminal = terminal_id,
+                PaneRole::Agent => {}
+            }
+            // Refocus the agent (root) pane so focus never dangles on a gone pane.
+            if let Some(agent) = ws.agent_pane() {
+                if let Some(tab_idx) = ws.find_tab_index_for_pane(agent) {
+                    ws.tabs[tab_idx].layout.focus_pane(agent);
+                }
+            }
+            self.state.mark_session_dirty();
+            return;
+        }
+
+        // Opening: pick the split target (so order stays review/terminal/agent).
+        let target = {
+            let Some(ws) = self.state.workspaces.get(ws_idx) else {
+                return;
+            };
+            match role {
+                // The terminal row splits the agent (root) pane.
+                PaneRole::Terminal => ws.agent_pane(),
+                // The review row lands above the terminal row when present, else
+                // above the agent — so review is always the topmost row.
+                PaneRole::Review => ws
+                    .pane_with_role(PaneRole::Terminal)
+                    .or_else(|| ws.agent_pane()),
+                PaneRole::Agent => None,
+            }
+        };
+        let Some(target) = target else {
+            return;
+        };
+
+        // Re-attach a kept-alive terminal, if we have one.
+        let detached = self.state.workspaces.get(ws_idx).and_then(|ws| match role {
+            PaneRole::Review => ws.detached_review.clone(),
+            PaneRole::Terminal => ws.detached_terminal.clone(),
+            PaneRole::Agent => None,
+        });
+        if let Some(terminal_id) = detached {
+            // Only re-attach if the terminal still exists; otherwise fall through
+            // to a fresh spawn.
+            if self.state.terminals.contains_key(&terminal_id) {
+                let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
+                    return;
+                };
+                if let Some(new) = ws.reattach_row(target, terminal_id, role) {
+                    if let Some(tab_idx) = ws.find_tab_index_for_pane(new) {
+                        ws.tabs[tab_idx].layout.focus_pane(new);
+                    }
+                    match role {
+                        PaneRole::Review => ws.detached_review = None,
+                        PaneRole::Terminal => ws.detached_terminal = None,
+                        PaneRole::Agent => {}
+                    }
+                    self.state.mark_session_dirty();
+                    return;
+                }
+            }
+            // Stale handle: drop it and spawn fresh.
+            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                match role {
+                    PaneRole::Review => ws.detached_review = None,
+                    PaneRole::Terminal => ws.detached_terminal = None,
+                    PaneRole::Agent => {}
+                }
+            }
+        }
+
+        // First open: build argv + cwd and spawn a fresh row.
+        let (argv, cwd) = match self.row_spawn_spec(ws_idx, role) {
+            Some(spec) => spec,
+            None => return,
+        };
+        let (rows, cols) = self.state.estimate_pane_size();
+        let result = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|ws| {
+                ws.split_pane_argv_command(
+                    target,
+                    ratatui::layout::Direction::Vertical,
+                    rows,
+                    cols,
+                    Some(cwd),
+                    &argv,
+                    self.state.pane_scrollback_limit_bytes,
+                    self.state.host_terminal_theme,
+                    true,
+                )
+            });
+        let (tab_idx, new) = match result {
+            Some(Ok(pair)) => pair,
+            Some(Err(err)) => {
+                tracing::warn!(error = %err, "row spawn failed");
+                self.state.set_home_toast("open row failed", err.to_string());
+                return;
+            }
+            None => return,
+        };
+        let new_pane_id = new.pane_id;
+        self.terminal_runtimes
+            .insert(new.terminal.id.clone(), new.runtime);
+        self.state
+            .remove_alias_shadowed_by_new_pane(new_pane_id);
+        self.state
+            .terminals
+            .insert(new.terminal.id.clone(), new.terminal);
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            // The fresh pane spawned BELOW target; swap it to the top row.
+            ws.tabs[tab_idx].layout.swap_panes(target, new_pane_id);
+            if let Some(pane) = ws.tabs[tab_idx].panes.get_mut(&new_pane_id) {
+                pane.role = role;
+            }
+            ws.tabs[tab_idx].layout.focus_pane(new_pane_id);
+        }
+        self.state.mark_session_dirty();
+    }
+
+    /// Build the (argv, cwd) for a freshly-spawned review/terminal row in the
+    /// active workspace's worktree. Returns `None` (with a toast for review when
+    /// the agent has no branch) when the row cannot be spawned.
+    fn row_spawn_spec(
+        &mut self,
+        ws_idx: usize,
+        role: crate::pane::PaneRole,
+    ) -> Option<(Vec<String>, PathBuf)> {
+        use crate::pane::PaneRole;
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let repo_root = ws
+            .worktree_space()
+            .map(|s| s.repo_root.clone())
+            .unwrap_or_else(|| ws.identity_cwd.clone());
+        let cwd = ws
+            .worktree_space()
+            .map(|s| s.checkout_path.clone())
+            .unwrap_or_else(|| ws.identity_cwd.clone());
+        let default_shell = self.state.default_shell.clone();
+        match role {
+            PaneRole::Terminal => {
+                let shell = crate::pane::pane_shell(&default_shell);
+                Some((vec![shell], cwd))
+            }
+            PaneRole::Review => {
+                let Some(agent_branch) = ws.branch() else {
+                    self.state
+                        .set_home_toast("review failed", "agent has no branch");
+                    return None;
+                };
+                let base = crate::workspace::review_base(&repo_root, &agent_branch);
+                let review_cmd = std::env::var("HERDR_REVIEW_CMD")
+                    .unwrap_or_else(|_| "vimrev".to_string());
+                let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
+                let shell = crate::pane::pane_shell(&default_shell);
+                Some((vec![shell, "-ic".to_string(), command_line], cwd))
+            }
+            PaneRole::Agent => None,
+        }
+    }
+
     fn agent_info(
         &self,
         ws_idx: usize,
