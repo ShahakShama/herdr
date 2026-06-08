@@ -767,6 +767,18 @@ pub enum Mode {
     Navigator,
 }
 
+impl Mode {
+    /// Whether this mode renders the keyboard-first home control surface
+    /// (Control + Agents halves with the Main pane) rather than the legacy
+    /// tabs/sidebar layout.
+    pub fn is_home_surface(self) -> bool {
+        matches!(
+            self,
+            Mode::Home | Mode::CreateAgent | Mode::ConfirmKill | Mode::Review
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NavigatorTarget {
     Workspace {

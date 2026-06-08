@@ -371,10 +371,7 @@ pub fn render_with_runtime_registry(
 
     if app.view.layout == ViewLayout::Mobile {
         render_mobile_header(app, terminal_runtimes, frame, app.view.mobile_header_rect);
-    } else if matches!(
-        app.mode,
-        Mode::Home | Mode::CreateAgent | Mode::ConfirmKill | Mode::Review
-    ) {
+    } else if app.mode.is_home_surface() {
         control::render_home_sidebar(app, terminal_runtimes, frame, sidebar_area);
     } else if app.sidebar_collapsed {
         render_sidebar_collapsed(app, frame, sidebar_area);

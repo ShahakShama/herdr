@@ -943,7 +943,14 @@ impl App {
     }
 
     pub(crate) fn ensure_default_workspace(&mut self) -> bool {
-        if !self.state.workspaces.is_empty() || self.state.mode == Mode::Onboarding {
+        // The keyboard-first home is a valid empty state: agents (workspaces)
+        // are created on demand via the control surface, so never auto-spawn a
+        // default workspace while it's showing — doing so would inject a stray
+        // agent and flip the app into the legacy Terminal layout.
+        if !self.state.workspaces.is_empty()
+            || self.state.mode == Mode::Onboarding
+            || self.state.mode.is_home_surface()
+        {
             return false;
         }
 

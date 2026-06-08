@@ -159,7 +159,12 @@ impl App {
         crate::logging::workspace_created(&workspace_id, root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
-            self.state.mode = Mode::Terminal;
+            // Terminal is only the post-creation default for the legacy layout.
+            // While the keyboard-first home is showing, stay on it — switching to
+            // Terminal here would silently drop the user into the old UI.
+            if !self.state.mode.is_home_surface() {
+                self.state.mode = Mode::Terminal;
+            }
         }
         self.schedule_session_save();
         Ok(idx)

@@ -633,11 +633,11 @@ impl App {
         let review_cmd =
             std::env::var("HERDR_REVIEW_CMD").unwrap_or_else(|_| "vimrev".to_string());
         let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
-        let argv = vec![
-            self.state.default_shell.clone(),
-            "-ic".to_string(),
-            command_line,
-        ];
+        // `default_shell` is empty by default; resolve it to $SHELL (then /bin/sh)
+        // so argv[0] is a real shell rather than "", which would make the PTY
+        // search PATH for an empty program name.
+        let shell = crate::pane::pane_shell(&self.state.default_shell);
+        let argv = vec![shell, "-ic".to_string(), command_line];
         let (rows, cols) = self.state.estimate_pane_size();
         match self.spawn_agent_workspace(review_path, rows, cols, &argv, true) {
             Ok((ws_idx, _tab, _pane)) => {
