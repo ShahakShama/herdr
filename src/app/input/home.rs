@@ -39,6 +39,14 @@ impl App {
     /// directly; pure state changes go through [`AppState::apply_home_key`].
     fn dispatch_home_key(&mut self, key: TerminalKey) -> bool {
         let event = key.as_key_event();
+        // Scroll the focused Main pane's scrollback with ctrl+shift+up/down (one
+        // line) and shift+pgup/pgdn (one page). Intercepted before any
+        // forwarding so the chords never reach the PTY; a no-op (falls through)
+        // unless Main has focus and the key is one of the scroll chords.
+        if self.state.main_focused() && self.try_scroll_main(key) {
+            return false;
+        }
+
         // `p` (plain in the agents pane, or alt+p anywhere) submits a PR for the
         // focused agent's branch; this runs `gh`, so it happens at the App level.
         if event.code == KeyCode::Char('p') && self.state.control.focus == FocusPane::Agents {
@@ -152,6 +160,100 @@ impl App {
         }
         if let Some(sender) = self.lookup_runtime_sender(ws_idx, pane_id) {
             let _ = sender.try_send_bytes(bytes::Bytes::from(bytes));
+        }
+    }
+
+    /// Scroll the focused Main pane's scrollback if `key` is a scroll chord.
+    /// Returns `true` when the key was a scroll chord (and thus consumed),
+    /// `false` otherwise so the caller forwards it to the PTY as usual. Callers
+    /// gate this on [`AppState::main_focused`]; with a sidebar pane focused the
+    /// chords are left untouched.
+    fn try_scroll_main(&mut self, key: TerminalKey) -> bool {
+        let Some(scroll) = ScrollChord::from_key(key) else {
+            return false;
+        };
+        let Some(ws_idx) = self.state.active else {
+            return true;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return true;
+        };
+        // A page is one screenful (the visible viewport); fall back to a single
+        // line when metrics are unavailable.
+        let page_rows = self
+            .state
+            .pane_scroll_metrics(&self.terminal_runtimes, pane_id)
+            .map_or(1, |m| m.viewport_rows.max(1));
+        let lines = match scroll.unit {
+            ScrollUnit::Line => 1,
+            ScrollUnit::Page => page_rows,
+        };
+        match scroll.direction {
+            ScrollDirection::Up => {
+                self.state
+                    .scroll_pane_up(&self.terminal_runtimes, pane_id, lines)
+            }
+            ScrollDirection::Down => {
+                self.state
+                    .scroll_pane_down(&self.terminal_runtimes, pane_id, lines)
+            }
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy)]
+enum ScrollUnit {
+    Line,
+    Page,
+}
+
+#[derive(Clone, Copy)]
+struct ScrollChord {
+    direction: ScrollDirection,
+    unit: ScrollUnit,
+}
+
+impl ScrollChord {
+    /// Classify a key as a Main-pane scrollback chord:
+    /// - ctrl+shift+up/down -> scroll one line,
+    /// - shift+pageup/pagedown -> scroll one page.
+    ///
+    /// Returns `None` for anything else (including plain pgup/pgdn and bare
+    /// up/down, which keep flowing to the PTY).
+    fn from_key(key: TerminalKey) -> Option<Self> {
+        let mods = key.modifiers;
+        let ctrl = mods.contains(KeyModifiers::CONTROL);
+        let shift = mods.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Up if ctrl && shift => Some(Self {
+                direction: ScrollDirection::Up,
+                unit: ScrollUnit::Line,
+            }),
+            KeyCode::Down if ctrl && shift => Some(Self {
+                direction: ScrollDirection::Down,
+                unit: ScrollUnit::Line,
+            }),
+            KeyCode::PageUp if shift => Some(Self {
+                direction: ScrollDirection::Up,
+                unit: ScrollUnit::Page,
+            }),
+            KeyCode::PageDown if shift => Some(Self {
+                direction: ScrollDirection::Down,
+                unit: ScrollUnit::Page,
+            }),
+            _ => None,
         }
     }
 }
@@ -685,5 +787,116 @@ mod tests {
         let mut state = AppState::test_new();
         state.control.focus = FocusPane::Main;
         assert!(!state.apply_home_key(plain(KeyCode::Char('a'))));
+    }
+
+    // --- Main-pane scrollback chords --------------------------------------
+
+    use super::super::{app_for_mouse_test, numbered_lines_bytes};
+    use crate::app::App;
+    use ratatui::layout::Rect;
+
+    /// Build an App whose single workspace has a Main pane with a deep
+    /// scrollback (enough rows to scroll several pages), and put focus on Main.
+    fn app_with_main_scrollback() -> (App, crate::layout::PaneId) {
+        let mut app = app_for_mouse_test();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let pane_infos = ws.tabs[0].layout.panes(Rect::new(0, 0, 20, 5));
+        let info = pane_infos[0].clone();
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                info.inner_rect.width,
+                info.inner_rect.height,
+                64 * 1024,
+                &numbered_lines_bytes(200),
+            ),
+        );
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Home;
+        app.state.control.focus = FocusPane::Main;
+        app.state.view.pane_infos = pane_infos;
+        (app, pane_id)
+    }
+
+    fn offset_from_bottom(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        app.state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_id)
+            .expect("scroll metrics")
+            .offset_from_bottom
+    }
+
+    fn viewport_rows(app: &App, pane_id: crate::layout::PaneId) -> usize {
+        app.state
+            .pane_scroll_metrics(&app.terminal_runtimes, pane_id)
+            .expect("scroll metrics")
+            .viewport_rows
+    }
+
+    fn ctrl_shift(code: KeyCode) -> TerminalKey {
+        TerminalKey::from(KeyEvent::new(
+            code,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ))
+    }
+
+    fn shift(code: KeyCode) -> TerminalKey {
+        TerminalKey::from(KeyEvent::new(code, KeyModifiers::SHIFT))
+    }
+
+    #[tokio::test]
+    async fn ctrl_shift_arrows_scroll_main_one_line() {
+        let (mut app, pane_id) = app_with_main_scrollback();
+        assert_eq!(offset_from_bottom(&app, pane_id), 0);
+
+        // ctrl+shift+up scrolls up one line; the key is consumed (not forwarded).
+        assert!(!app.dispatch_home_key(ctrl_shift(KeyCode::Up)));
+        assert_eq!(offset_from_bottom(&app, pane_id), 1);
+
+        assert!(!app.dispatch_home_key(ctrl_shift(KeyCode::Up)));
+        assert_eq!(offset_from_bottom(&app, pane_id), 2);
+
+        // ctrl+shift+down scrolls back down one line.
+        assert!(!app.dispatch_home_key(ctrl_shift(KeyCode::Down)));
+        assert_eq!(offset_from_bottom(&app, pane_id), 1);
+    }
+
+    #[tokio::test]
+    async fn shift_pageup_pagedown_scroll_main_one_page() {
+        let (mut app, pane_id) = app_with_main_scrollback();
+        let page = viewport_rows(&app, pane_id);
+        assert!(page >= 1);
+        assert_eq!(offset_from_bottom(&app, pane_id), 0);
+
+        assert!(!app.dispatch_home_key(shift(KeyCode::PageUp)));
+        assert_eq!(offset_from_bottom(&app, pane_id), page);
+
+        assert!(!app.dispatch_home_key(shift(KeyCode::PageDown)));
+        assert_eq!(offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[tokio::test]
+    async fn scroll_chords_are_noops_when_sidebar_focused() {
+        let (mut app, pane_id) = app_with_main_scrollback();
+        app.state.control.focus = FocusPane::Control;
+        assert_eq!(offset_from_bottom(&app, pane_id), 0);
+
+        // With a sidebar pane focused these are not scroll chords; the Main
+        // scrollback is untouched. (Control is a list pane, so the key is
+        // consumed there rather than scrolling.)
+        app.dispatch_home_key(ctrl_shift(KeyCode::Up));
+        app.dispatch_home_key(shift(KeyCode::PageUp));
+        assert_eq!(offset_from_bottom(&app, pane_id), 0);
+    }
+
+    #[test]
+    fn plain_arrows_and_pageup_are_not_scroll_chords() {
+        // The classifier only matches the exact modifier combinations.
+        assert!(ScrollChord::from_key(plain(KeyCode::Up)).is_none());
+        assert!(ScrollChord::from_key(plain(KeyCode::PageUp)).is_none());
+        assert!(ScrollChord::from_key(ctrl_shift(KeyCode::Up)).is_some());
+        assert!(ScrollChord::from_key(shift(KeyCode::PageUp)).is_some());
     }
 }
