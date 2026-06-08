@@ -42,7 +42,7 @@ impl App {
         let resolved = self.resolve_terminal_target(target)?;
         self.state
             .focus_pane_in_workspace(resolved.ws_idx, resolved.pane_id);
-        self.state.mode = Mode::Terminal;
+        self.state.mode = Mode::Home;
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
@@ -340,7 +340,7 @@ impl App {
             .remove_alias_shadowed_by_new_pane(self.state.workspaces[ws_idx].tabs[0].root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(ws_idx);
-            self.state.mode = Mode::Terminal;
+            self.state.mode = Mode::Home;
         }
         self.schedule_session_save();
         let pane_id = self.state.workspaces[ws_idx].tabs[0].root_pane;
@@ -394,7 +394,7 @@ impl App {
             self.state.switch_workspace_tab(ws_idx, result.0);
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, result.1.pane_id);
-            self.state.mode = Mode::Terminal;
+            self.state.mode = Mode::Home;
         }
         self.schedule_session_save();
         Ok((ws_idx, result.0, result.1.pane_id))
@@ -501,6 +501,149 @@ impl App {
                 self.state.set_home_toast("create agent failed", body.message);
             }
         }
+        self.state.mode = Mode::Home;
+        self.state.name_input.clear();
+    }
+
+    /// Open a plain interactive shell in the selected repository's root and
+    /// surface it in Main. Unlike a new agent, this creates no worktree — it
+    /// just drops a terminal into the repo so you can run ad-hoc commands.
+    pub(super) fn open_terminal_in_selected_repo(&mut self) {
+        let Some(repo) = self.state.control.selected_repository().cloned() else {
+            return;
+        };
+        let shell = crate::pane::pane_shell(&self.state.default_shell);
+        let argv = vec![shell];
+        let (rows, cols) = self.state.estimate_pane_size();
+        match self.spawn_agent_workspace(repo.root.clone(), rows, cols, &argv, true) {
+            Ok((ws_idx, _tab, _pane)) => {
+                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                    ws.set_custom_name(format!("terminal: {}", repo.label));
+                }
+                self.state.active = Some(ws_idx);
+                self.state.selected = ws_idx;
+                self.state.control.focus = crate::app::state::FocusPane::Main;
+            }
+            Err(err) => {
+                let body = self.agent_start_error_body(err);
+                tracing::warn!(error = %body.message, "open-terminal spawn failed");
+                self.state.set_home_toast("open terminal failed", body.message);
+            }
+        }
+        self.state.mode = Mode::Home;
+    }
+
+    /// Handle a key while in [`Mode::RenameAgent`] (the rename form).
+    pub(super) fn handle_rename_agent_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match key.code {
+            KeyCode::Esc => {
+                self.state.mode = Mode::Home;
+                self.state.name_input.clear();
+            }
+            KeyCode::Enter => self.submit_rename_agent(),
+            KeyCode::Backspace => {
+                if self.state.name_input_replace_on_type {
+                    self.state.name_input.clear();
+                    self.state.name_input_replace_on_type = false;
+                } else {
+                    self.state.name_input.pop();
+                }
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) =>
+            {
+                if self.state.name_input_replace_on_type {
+                    self.state.name_input.clear();
+                    self.state.name_input_replace_on_type = false;
+                }
+                self.state.name_input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply the rename: relabel the selected agent and, when it owns a managed
+    /// worktree, move the worktree directory so its name tracks the agent's.
+    fn submit_rename_agent(&mut self) {
+        let name = self.state.name_input.trim().to_string();
+        if name.is_empty() {
+            // Keep the form open until a name is provided.
+            return;
+        }
+
+        let entries = crate::ui::agent_panel_entries_all(&self.state);
+        let Some(ws_idx) = entries
+            .get(self.state.control.selected_agent)
+            .map(|entry| entry.ws_idx)
+        else {
+            self.state.mode = Mode::Home;
+            self.state.name_input.clear();
+            return;
+        };
+
+        // Move the worktree directory to match the new name, if this agent owns a
+        // managed (linked) worktree. The directory name is derived the same way
+        // as at creation: <worktree_dir>/<repo>/<name-slug>.
+        let move_plan = self.state.workspaces.get(ws_idx).and_then(|ws| {
+            ws.worktree_space().map(|space| {
+                let new_path = crate::worktree::default_checkout_path(
+                    &self.state.worktree_directory,
+                    &space.label,
+                    &name,
+                );
+                (space.repo_root.clone(), space.checkout_path.clone(), new_path)
+            })
+        });
+
+        let mut moved_to: Option<PathBuf> = None;
+        if let Some((repo_root, old_path, new_path)) = move_plan {
+            if new_path != old_path {
+                let command =
+                    crate::worktree::build_worktree_move_command(&repo_root, &old_path, &new_path);
+                if let Err(err) = crate::worktree::run_worktree_command(&command) {
+                    tracing::warn!(error = %err, "rename-agent worktree move failed");
+                    self.state.set_home_toast("rename failed", err);
+                    self.state.mode = Mode::Home;
+                    self.state.name_input.clear();
+                    return;
+                }
+                moved_to = Some(new_path);
+            }
+        }
+
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            ws.set_custom_name(name.clone());
+            if let Some(new_path) = moved_to.clone() {
+                ws.identity_cwd = new_path.clone();
+                if let Some(space) = ws.worktree_space.as_mut() {
+                    space.checkout_path = new_path;
+                }
+            }
+        }
+
+        // Relabel the agent terminal and repoint its recorded cwd at the moved
+        // worktree so later actions (PR, review) resolve the right path.
+        if let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+            .and_then(|pane_id| self.state.workspaces[ws_idx].terminal_id(pane_id))
+            .cloned()
+        {
+            if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                terminal.set_agent_name(name.clone());
+                terminal.set_manual_label(name);
+                if let Some(new_path) = moved_to {
+                    terminal.cwd = new_path;
+                }
+            }
+        }
+
+        self.state.mark_session_dirty();
         self.state.mode = Mode::Home;
         self.state.name_input.clear();
     }

@@ -1,6 +1,6 @@
 use crate::config::{Keybinds, NewTerminalCwdConfig, SoundConfig, ToastConfig, ToastDelivery};
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::layout::{Direction, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::detect::AgentState;
@@ -32,11 +32,6 @@ pub(crate) struct SelectionAutoscroll {
     pub inner_rect: Rect,
 }
 
-#[derive(Clone)]
-pub(crate) struct RightClickPassthroughGesture {
-    pub pane_info: PaneInfo,
-    pub modifiers: KeyModifiers,
-}
 use crate::terminal_theme::TerminalTheme;
 use crate::workspace::Workspace;
 
@@ -676,30 +671,6 @@ impl WorktreeOpenState {
             indices.first().copied()
         }
     }
-
-    pub(crate) fn normalize_selection(&mut self) {
-        if let Some(selected) = self.selected_entry_index() {
-            self.selected = selected;
-        }
-    }
-
-    pub(crate) fn select_previous_filtered(&mut self) {
-        let indices = self.filtered_indices();
-        let Some(current) = self.selected_entry_index() else {
-            return;
-        };
-        let pos = indices.iter().position(|idx| *idx == current).unwrap_or(0);
-        self.selected = indices[pos.saturating_sub(1)];
-    }
-
-    pub(crate) fn select_next_filtered(&mut self) {
-        let indices = self.filtered_indices();
-        let Some(current) = self.selected_entry_index() else {
-            return;
-        };
-        let pos = indices.iter().position(|idx| *idx == current).unwrap_or(0);
-        self.selected = indices[(pos + 1).min(indices.len().saturating_sub(1))];
-    }
 }
 
 pub(crate) fn text_matches_query(query: &str, text: &str) -> bool {
@@ -715,7 +686,6 @@ pub(crate) fn text_matches_query(query: &str, text: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewLayout {
     Desktop,
-    Mobile,
 }
 
 pub struct ViewState {
@@ -733,6 +703,9 @@ pub struct ViewState {
     pub toast_hit_area: Rect,
     pub pane_infos: Vec<PaneInfo>,
     pub split_borders: Vec<SplitBorder>,
+    /// In the keyboard-first home surface, the outer rect of the Main pane box
+    /// (whose border indicates focus). `Rect::default()` outside that surface.
+    pub home_main_rect: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -743,89 +716,37 @@ pub enum Mode {
     CreateAgent,
     /// Confirm killing the selected agent.
     ConfirmKill,
+    /// Rename the selected agent (and move its worktree directory to match).
+    RenameAgent,
     /// Review: branch picker for the selected repo (control half → review half).
     Review,
-    Onboarding,
-    ReleaseNotes,
-    ProductAnnouncement,
-    Navigate,
-    Prefix,
+    /// Keyboard scrollback + selection + yank for the focused Main pane.
     Copy,
-    Terminal,
-    RenameWorkspace,
-    RenameTab,
-    RenamePane,
-    NewLinkedWorktree,
-    OpenExistingWorktree,
-    ConfirmRemoveWorktree,
-    Resize,
-    ConfirmClose,
-    ContextMenu,
+    /// First-run onboarding overlay.
+    Onboarding,
+    /// Release-notes overlay.
+    ReleaseNotes,
+    /// Product-announcement overlay.
+    ProductAnnouncement,
+    /// Settings overlay.
     Settings,
-    GlobalMenu,
+    /// Keybinding help overlay.
     KeybindHelp,
-    Navigator,
 }
 
 impl Mode {
     /// Whether this mode renders the keyboard-first home control surface
-    /// (Control + Agents halves with the Main pane) rather than the legacy
-    /// tabs/sidebar layout.
+    /// (Control + Agents halves with the Main pane) as its interactive layer.
     pub fn is_home_surface(self) -> bool {
         matches!(
             self,
-            Mode::Home | Mode::CreateAgent | Mode::ConfirmKill | Mode::Review
+            Mode::Home
+                | Mode::CreateAgent
+                | Mode::ConfirmKill
+                | Mode::RenameAgent
+                | Mode::Review
         )
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NavigatorTarget {
-    Workspace {
-        ws_idx: usize,
-    },
-    Tab {
-        ws_idx: usize,
-        tab_idx: usize,
-    },
-    Pane {
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: PaneId,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NavigatorRow {
-    pub target: NavigatorTarget,
-    pub depth: u8,
-    pub label: String,
-    pub meta: String,
-    pub status: AgentState,
-    pub seen: bool,
-    pub is_current: bool,
-    pub is_workspace: bool,
-    pub is_tab: bool,
-    pub expanded: bool,
-    pub search_text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NavigatorStateFilter {
-    Blocked,
-    Working,
-    Idle,
-    Done,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct NavigatorState {
-    pub query: String,
-    pub selected: usize,
-    pub scroll: usize,
-    pub search_focused: bool,
-    pub state_filter: Option<NavigatorStateFilter>,
-    pub expanded_workspaces: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1046,22 +967,6 @@ impl MenuListState {
     pub fn new(highlighted: usize) -> Self {
         Self { highlighted }
     }
-
-    pub fn move_prev(&mut self) {
-        self.highlighted = self.highlighted.saturating_sub(1);
-    }
-
-    pub fn move_next(&mut self, item_count: usize) {
-        if item_count > 0 {
-            self.highlighted = (self.highlighted + 1).min(item_count - 1);
-        }
-    }
-
-    pub fn hover(&mut self, idx: Option<usize>) {
-        if let Some(idx) = idx {
-            self.highlighted = idx;
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1083,10 +988,6 @@ impl SelectionListState {
             self.selected = (self.selected + 1).min(item_count - 1);
         }
     }
-
-    pub fn select(&mut self, idx: usize) {
-        self.selected = idx;
-    }
 }
 
 pub struct SettingsState {
@@ -1098,62 +999,6 @@ pub struct SettingsState {
     pub original_palette: Option<Palette>,
     /// The theme name before opening settings.
     pub original_theme: Option<String>,
-}
-
-pub(crate) enum DragTarget {
-    WorkspaceReorder {
-        source_ws_idx: usize,
-        insert_idx: Option<usize>,
-    },
-    TabReorder {
-        ws_idx: usize,
-        source_tab_idx: usize,
-        insert_idx: Option<usize>,
-    },
-    WorkspaceListScrollbar {
-        grab_row_offset: u16,
-    },
-    AgentPanelScrollbar {
-        grab_row_offset: u16,
-    },
-    PaneSplit {
-        path: Vec<bool>,
-        direction: Direction,
-        area: Rect,
-    },
-    PaneScrollbar {
-        pane_id: crate::layout::PaneId,
-        grab_row_offset: u16,
-    },
-    ReleaseNotesScrollbar {
-        grab_row_offset: u16,
-    },
-    ProductAnnouncementScrollbar {
-        grab_row_offset: u16,
-    },
-    KeybindHelpScrollbar {
-        grab_row_offset: u16,
-    },
-    SidebarDivider,
-    SidebarSectionDivider,
-}
-
-/// Active mouse drag on a split border or sidebar divider.
-pub(crate) struct DragState {
-    pub target: DragTarget,
-}
-
-pub(crate) struct WorkspacePressState {
-    pub ws_idx: usize,
-    pub start_col: u16,
-    pub start_row: u16,
-}
-
-pub(crate) struct TabPressState {
-    pub ws_idx: usize,
-    pub tab_idx: usize,
-    pub start_col: u16,
-    pub start_row: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1396,9 +1241,7 @@ pub struct AppState {
     /// Set when UI interaction requested a clipboard write that must be
     /// handled by the outer App/event loop instead of directly from AppState.
     pub request_clipboard_write: Option<Vec<u8>>,
-    pub creating_new_tab: bool,
     pub requested_new_tab_name: Option<String>,
-    pub rename_pane_target: Option<PaneId>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -1410,18 +1253,13 @@ pub struct AppState {
     pub release_notes: Option<ReleaseNotesState>,
     pub product_announcement: Option<ProductAnnouncementState>,
     pub keybind_help: KeybindHelpState,
-    pub navigator: NavigatorState,
     pub copy_mode: Option<CopyModeState>,
     pub workspace_scroll: usize,
     pub agent_panel_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
-    pub mobile_switcher_scroll: usize,
     // View geometry (computed before render, consumed by render + mouse)
     pub view: ViewState,
-    pub(crate) drag: Option<DragState>,
-    pub(crate) workspace_press: Option<WorkspacePressState>,
-    pub(crate) tab_press: Option<TabPressState>,
     pub selection: Option<Selection>,
     pub selection_autoscroll: Option<SelectionAutoscroll>,
     pub context_menu: Option<ContextMenuState>,
@@ -1446,8 +1284,6 @@ pub struct AppState {
     pub sidebar_max_width: u16,
     pub mobile_width_threshold: u16,
     pub sidebar_width_source: SidebarWidthSource,
-    pub sidebar_width_auto: bool,
-    pub sidebar_collapsed: bool,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
     pub agent_panel_scope: AgentPanelScope,
@@ -1455,7 +1291,6 @@ pub struct AppState {
     /// captures mouse while the focused pane app requests mouse reporting.
     pub mouse_capture: bool,
     pub right_click_passthrough_modifiers: Option<KeyModifiers>,
-    pub right_click_passthrough: Option<RightClickPassthroughGesture>,
     pub redraw_on_focus_gained: bool,
     pub mouse_scroll_lines: usize,
     pub confirm_close: bool,
@@ -1500,8 +1335,6 @@ pub struct AppState {
     pub integration_recommendations: Vec<crate::integration::IntegrationRecommendation>,
     /// Result messages from the latest integration install action.
     pub integration_install_messages: Vec<String>,
-    /// Highlight state for the bottom-right global launcher menu.
-    pub global_menu: MenuListState,
     /// Resolved host terminal default colors for theming embedded panes.
     pub host_terminal_theme: TerminalTheme,
     /// Set when a persisted session snapshot would change.
@@ -1559,24 +1392,23 @@ impl AppState {
             .any(|item| item.state == crate::integration::IntegrationStatusKind::Outdated)
     }
 
-    pub(crate) fn global_menu_attention_badge_visible(&self) -> bool {
-        self.update_available.is_some() || self.integration_updates_available()
-    }
-
-    pub(crate) fn global_menu_item_has_badge(&self, item: &str) -> bool {
-        (item == "update ready" && self.update_available.is_some())
-            || (item == "settings" && self.integration_updates_available())
-    }
-
     pub(crate) fn settings_section_has_badge(&self, section: SettingsSection) -> bool {
         section == SettingsSection::Integrations && self.integration_updates_available()
+    }
+
+    /// Whether the Main pane is the live interaction target: a keyboard-first
+    /// home surface with focus on Main. Keys, mouse, the pane cursor, and kitty
+    /// graphics are routed to the focused pane in this state — the new-UI
+    /// equivalent of the old `Mode::Home`.
+    pub(crate) fn main_focused(&self) -> bool {
+        self.mode.is_home_surface() && self.control.focus == FocusPane::Main
     }
 
     pub(crate) fn focused_pane_requests_mouse_capture_from(
         &self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
-        self.mode == Mode::Terminal
+        self.main_focused()
             && self
                 .active
                 .and_then(|idx| self.focused_runtime_in_workspace(terminal_runtimes, idx))
@@ -1589,10 +1421,6 @@ impl AppState {
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) -> bool {
         self.mouse_capture || self.focused_pane_requests_mouse_capture_from(terminal_runtimes)
-    }
-
-    pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
-        crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
@@ -1658,27 +1486,6 @@ impl AppState {
         let pane_id = ws.focused_pane_id()?;
         self.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, pane_id)
     }
-
-    pub fn is_active_pane(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) -> bool {
-        let Some(active_ws_idx) = self.active else {
-            return false;
-        };
-        if ws_idx != active_ws_idx {
-            return false;
-        }
-        let Some(ws) = self.workspaces.get(ws_idx) else {
-            return false;
-        };
-        if tab_idx != ws.active_tab_index() {
-            return false;
-        }
-        ws.active_tab().map(|tab| tab.layout.focused()) == Some(pane_id)
-    }
 }
 
 #[cfg(test)]
@@ -1709,7 +1516,7 @@ impl AppState {
             active: None,
             previous_pane_focus: None,
             selected: 0,
-            mode: Mode::Navigate,
+            mode: Mode::Home,
             should_quit: false,
             detach_exits: false,
             detach_requested: false,
@@ -1725,9 +1532,7 @@ impl AppState {
             request_reload_config: false,
             request_client_config_reload: false,
             request_clipboard_write: None,
-            creating_new_tab: false,
             requested_new_tab_name: None,
-            rename_pane_target: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -1739,13 +1544,11 @@ impl AppState {
             release_notes: None,
             product_announcement: None,
             keybind_help: KeybindHelpState { scroll: 0 },
-            navigator: NavigatorState::default(),
             copy_mode: None,
             workspace_scroll: 0,
             agent_panel_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
-            mobile_switcher_scroll: 0,
             view: ViewState {
                 layout: ViewLayout::Desktop,
                 sidebar_rect: Rect::default(),
@@ -1761,10 +1564,8 @@ impl AppState {
                 toast_hit_area: Rect::default(),
                 pane_infos: Vec::new(),
                 split_borders: Vec::new(),
+                home_main_rect: Rect::default(),
             },
-            drag: None,
-            workspace_press: None,
-            tab_press: None,
             selection: None,
             selection_autoscroll: None,
             context_menu: None,
@@ -1785,13 +1586,10 @@ impl AppState {
             sidebar_max_width: 36,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
-            sidebar_width_auto: false,
-            sidebar_collapsed: false,
             sidebar_section_split: 0.5,
             agent_panel_scope: AgentPanelScope::AllWorkspaces,
             mouse_capture: true,
             right_click_passthrough_modifiers: None,
-            right_click_passthrough: None,
             redraw_on_focus_gained: true,
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             confirm_close: true,
@@ -1828,7 +1626,6 @@ impl AppState {
             },
             integration_recommendations: Vec::new(),
             integration_install_messages: Vec::new(),
-            global_menu: MenuListState::new(0),
             host_terminal_theme: TerminalTheme::default(),
             session_dirty: false,
             terminal_runtime_shutdowns: Vec::new(),

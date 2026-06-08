@@ -24,7 +24,8 @@ use super::{
         contains_scrollback_clear_sequence, current_transient_default_color_owner,
         maybe_filter_primary_screen_scrollback_clear, restore_host_terminal_theme_if_needed,
         write_host_terminal_theme, DefaultColorEvent, DefaultColorEventTracker,
-        DefaultColorOscTracker, DefaultColorQuery, DefaultColorTrackedEvent, Osc52Forwarder,
+        DefaultColorOscTracker, DefaultColorQuery, DefaultColorTrackedEvent,
+        HerdrFocusSignalTracker, Osc52Forwarder,
     },
     xtgettcap::{XtgettcapQueryTracker, XtgettcapResponse},
 };
@@ -101,6 +102,7 @@ pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub focus_signals: Vec<crate::events::PaneFocusDirection>,
     pub terminal_responses: Vec<Bytes>,
 }
 
@@ -124,6 +126,7 @@ pub(crate) struct GhosttyPaneCore {
     pub child_default_background_changed: bool,
     pub osc52_forwarder: Osc52Forwarder,
     pub xtgettcap_query_tracker: XtgettcapQueryTracker,
+    pub herdr_focus_tracker: HerdrFocusSignalTracker,
 }
 
 pub(crate) struct PaneTerminal {
@@ -353,6 +356,7 @@ impl GhosttyPaneTerminal {
                 child_default_background_changed: false,
                 osc52_forwarder: Osc52Forwarder::default(),
                 xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
+                herdr_focus_tracker: HerdrFocusSignalTracker::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
@@ -419,6 +423,7 @@ impl GhosttyPaneTerminal {
                 request_render: false,
                 render_delay: None,
                 clipboard_writes: Vec::new(),
+                focus_signals: Vec::new(),
                 terminal_responses: Vec::new(),
             };
         };
@@ -436,6 +441,9 @@ impl GhosttyPaneTerminal {
 
         core.osc52_forwarder.observe(bytes);
         let clipboard_writes = core.osc52_forwarder.drain_pending();
+
+        core.herdr_focus_tracker.observe(bytes);
+        let focus_signals = core.herdr_focus_tracker.drain_pending();
 
         let alternate_screen = core
             .terminal
@@ -507,6 +515,7 @@ impl GhosttyPaneTerminal {
             request_render,
             render_delay,
             clipboard_writes,
+            focus_signals,
             terminal_responses,
         }
     }
@@ -2792,6 +2801,9 @@ mod tests {
 
     #[test]
     fn render_blanks_kitty_unicode_placeholders_when_graphics_enabled() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::kitty_graphics::set_enabled(true);
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(20, 5, 0).unwrap();

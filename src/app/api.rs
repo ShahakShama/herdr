@@ -66,6 +66,14 @@ impl App {
             return;
         }
 
+        if let AppEvent::PaneFocusSignal { pane_id, direction } = ev {
+            if self.apply_pane_focus_signal(pane_id, direction) {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
         if let AppEvent::PaneDied { pane_id } = &ev {
             if self.runtime_exit_action(*pane_id) == RuntimeExitAction::RespawnShell
                 && self.respawn_shell_for_launch_pane(*pane_id)
@@ -215,6 +223,36 @@ impl App {
         self.shutdown_detached_terminal_runtimes();
     }
 
+    /// Move herdr's pane focus in response to a pane (vim) reporting it had no
+    /// window to move to. Only the focused Main pane can trigger this, and only
+    /// the leftward signal maps to a herdr neighbour (the sidebar sits to the
+    /// left of Main). Returns whether focus actually changed.
+    fn apply_pane_focus_signal(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        direction: crate::events::PaneFocusDirection,
+    ) -> bool {
+        use crate::app::state::FocusPane;
+        use crate::events::PaneFocusDirection;
+
+        if self.state.mode != Mode::Home
+            || self.state.control.focus != FocusPane::Main
+            || direction != PaneFocusDirection::Left
+        {
+            return false;
+        }
+        let focused_pane = self
+            .state
+            .active
+            .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+            .and_then(|ws| ws.focused_pane_id());
+        if focused_pane != Some(pane_id) {
+            return false;
+        }
+        self.state.home_focus_left();
+        true
+    }
+
     pub(crate) fn refresh_new_herdr_toast_context_for_update(
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
@@ -290,7 +328,7 @@ impl App {
         tab.zoomed = overlay.previous_zoomed;
 
         if self.state.active == Some(overlay.ws_idx) {
-            self.state.mode = Mode::Terminal;
+            self.state.mode = Mode::Home;
         }
     }
 
@@ -856,7 +894,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.mode = Mode::Home;
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 0;
 
@@ -948,7 +986,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.mode = Mode::Home;
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 1;
 
@@ -1081,7 +1119,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = "/__herdr_projects__".into();
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.mode = Mode::Home;
         app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
 
         app.handle_internal_event(AppEvent::StateChanged {

@@ -23,132 +23,44 @@ fn help_entry(key: impl Into<String>, label: &'static str) -> HelpEntry {
     (key.into(), Cow::Borrowed(label))
 }
 
-fn keybind_label(bindings: &crate::config::ActionKeybinds) -> String {
-    bindings.label().unwrap_or_else(|| "unset".to_string())
-}
-
-fn indexed_label(bindings: &[crate::config::IndexedKeybind]) -> String {
-    if bindings.is_empty() {
-        "unset".to_string()
-    } else if bindings.len() == 9 {
-        let first = &bindings[0].label;
-        if first.ends_with('1') {
-            format!("{}1..9", first.trim_end_matches('1'))
-        } else {
-            bindings
-                .iter()
-                .map(|binding| binding.label.clone())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        }
-    } else {
-        bindings
-            .iter()
-            .map(|binding| binding.label.clone())
-            .collect::<Vec<_>>()
-            .join(" / ")
-    }
-}
-
 pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let kb = &app.keybinds;
-    let mut groups = Vec::new();
-
-    groups.push((
-        "global",
-        vec![
-            help_entry(
-                crate::config::format_key_combo((app.prefix_code, app.prefix_mods)),
-                "prefix mode",
-            ),
-            help_entry(keybind_label(&kb.help), "keybinds"),
-            help_entry(keybind_label(&kb.settings), "settings"),
-            help_entry(keybind_label(&kb.detach), "detach"),
-            help_entry(keybind_label(&kb.reload_config), "reload config"),
-            help_entry(
-                keybind_label(&kb.open_notification_target),
-                "open notification target",
-            ),
-        ],
-    ));
-
-    groups.push((
-        "navigation",
-        vec![
-            help_entry("esc", "back"),
-            help_entry(
-                format!(
-                    "{} / {}",
-                    keybind_label(&kb.navigate.workspace_up),
-                    keybind_label(&kb.navigate.workspace_down)
-                ),
-                "workspace list",
-            ),
-            help_entry(
-                format!(
-                    "{} / {} / {} / {} / left / right",
-                    keybind_label(&kb.navigate.pane_left),
-                    keybind_label(&kb.navigate.pane_down),
-                    keybind_label(&kb.navigate.pane_up),
-                    keybind_label(&kb.navigate.pane_right)
-                ),
-                "move focus",
-            ),
-            help_entry("tab / shift+tab", "cycle pane"),
-            help_entry("enter", "open workspace"),
-            help_entry("1..9", "switch workspace"),
-        ],
-    ));
-
-    let workspace_tab = vec![
-        help_entry(keybind_label(&kb.workspace_picker), "workspace navigation"),
-        help_entry(keybind_label(&kb.goto), "session navigator"),
-        help_entry(keybind_label(&kb.new_workspace), "new workspace"),
-        help_entry(keybind_label(&kb.new_worktree), "new worktree"),
-        help_entry(keybind_label(&kb.open_worktree), "open worktree"),
-        help_entry(
-            keybind_label(&kb.remove_worktree),
-            "delete worktree checkout",
+    let mut groups = vec![
+        (
+            "focus",
+            vec![
+                help_entry("alt+h / alt+l", "left column / Main pane"),
+                help_entry("alt+k / alt+j", "Control half / Agents half"),
+                help_entry("alt+1..9", "focus agent 1-9"),
+            ],
         ),
-        help_entry(keybind_label(&kb.rename_workspace), "rename workspace"),
-        help_entry(keybind_label(&kb.close_workspace), "close workspace"),
-        help_entry(keybind_label(&kb.previous_workspace), "previous workspace"),
-        help_entry(keybind_label(&kb.next_workspace), "next workspace"),
-        help_entry(indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
-        help_entry(keybind_label(&kb.previous_agent), "previous agent"),
-        help_entry(keybind_label(&kb.next_agent), "next agent"),
-        help_entry(indexed_label(&kb.focus_agent), "focus agent 1-9"),
-        help_entry(keybind_label(&kb.new_tab), "new tab"),
-        help_entry(keybind_label(&kb.rename_tab), "rename tab"),
-        help_entry(keybind_label(&kb.previous_tab), "previous tab"),
-        help_entry(keybind_label(&kb.next_tab), "next tab"),
-        help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
-        help_entry(keybind_label(&kb.close_tab), "close tab"),
-    ];
-    groups.push(("workspaces / tabs", workspace_tab));
-
-    let panes = vec![
-        help_entry(keybind_label(&kb.split_vertical), "split vertical"),
-        help_entry(keybind_label(&kb.split_horizontal), "split horizontal"),
-        help_entry(keybind_label(&kb.close_pane), "close pane"),
-        help_entry(keybind_label(&kb.rename_pane), "rename pane"),
-        help_entry(keybind_label(&kb.edit_scrollback), "edit scrollback"),
-        help_entry(keybind_label(&kb.copy_mode), "copy mode"),
-        help_entry(keybind_label(&kb.zoom), "zoom pane"),
-        help_entry(keybind_label(&kb.resize_mode), "resize mode"),
-        help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
-        help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
-        help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
-        help_entry(keybind_label(&kb.focus_pane_up), "focus pane up"),
-        help_entry(keybind_label(&kb.focus_pane_right), "focus pane right"),
-        help_entry(keybind_label(&kb.cycle_pane_next), "cycle pane next"),
-        help_entry(
-            keybind_label(&kb.cycle_pane_previous),
-            "cycle pane previous",
+        (
+            "selection",
+            vec![
+                help_entry("↑ / ↓  ·  j / k", "move selection in the focused list"),
+                help_entry("enter", "activate selection (focus stays put)"),
+                help_entry("esc", "back / cancel"),
+            ],
         ),
-        help_entry(keybind_label(&kb.last_pane), "last pane"),
+        (
+            "commands",
+            vec![
+                help_entry("alt+n", "new agent on the selected repo"),
+                help_entry("alt+r", "review repo (Control) · rename agent (Agents)"),
+                help_entry("alt+x", "kill the selected agent"),
+                help_entry("alt+p", "submit a PR for the agent/branch"),
+                help_entry("alt+t", "open a terminal in the selected repo"),
+                help_entry("alt+s", "copy mode (keyboard scrollback + yank)"),
+                help_entry("alt+,", "settings"),
+                help_entry("alt+?", "this keybind help"),
+                help_entry("alt+q", "quit"),
+            ],
+        ),
+        (
+            "agent pane (reserved, sent to the agent)",
+            vec![help_entry("ctrl+c / d / z / l / a / e / u / w / r", "passed through to the focused agent")],
+        ),
     ];
-    groups.push(("panes", panes));
 
     if !kb.custom_commands.is_empty() {
         groups.push((

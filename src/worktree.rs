@@ -109,6 +109,26 @@ pub(crate) fn build_worktree_remove_command(
     }
 }
 
+/// `git -C <repo_root> worktree move <from> <to>` — relocate a linked worktree
+/// and rewrite its gitdir pointers so a running process inside it keeps working.
+pub(crate) fn build_worktree_move_command(
+    repo_root: &Path,
+    from: &Path,
+    to: &Path,
+) -> WorktreeCommand {
+    WorktreeCommand {
+        program: "git".to_string(),
+        args: vec![
+            "-C".to_string(),
+            repo_root.display().to_string(),
+            "worktree".to_string(),
+            "move".to_string(),
+            from.display().to_string(),
+            to.display().to_string(),
+        ],
+    }
+}
+
 pub(crate) fn is_dirty_worktree_remove_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("contains modified or untracked files")

@@ -81,15 +81,6 @@ pub enum AgentPanelScopeConfig {
     All,
 }
 
-impl AgentPanelScopeConfig {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::All => "all",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RightClickPassthroughModifierConfig(Option<KeyModifiers>);
 
@@ -600,7 +591,7 @@ impl Default for KeysConfig {
 impl Default for WorktreesConfig {
     fn default() -> Self {
         Self {
-            directory: "~/.herdr/worktrees".into(),
+            directory: "~/worktrees".into(),
         }
     }
 }
@@ -816,7 +807,7 @@ show_agent_labels_on_pane_borders = true
     #[test]
     fn worktrees_directory_defaults_and_parses() {
         let default_config = Config::default();
-        assert_eq!(default_config.worktrees.directory, "~/.herdr/worktrees");
+        assert_eq!(default_config.worktrees.directory, "~/worktrees");
 
         let toml = r#"
 [worktrees]

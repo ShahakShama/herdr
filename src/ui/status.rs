@@ -190,16 +190,6 @@ pub(super) fn render_config_diagnostic(frame: &mut Frame, area: Rect, message: &
     }
 }
 
-pub(super) fn state_dot(state: AgentState, seen: bool, p: &Palette) -> (&'static str, Style) {
-    match (state, seen) {
-        (AgentState::Blocked, _) => ("●", Style::default().fg(p.red)),
-        (AgentState::Working, _) => ("●", Style::default().fg(p.yellow)),
-        (AgentState::Idle, false) => ("●", Style::default().fg(p.teal)),
-        (AgentState::Idle, true) => ("○", Style::default().fg(p.green)),
-        (AgentState::Unknown, _) => ("·", Style::default().fg(p.overlay0)),
-    }
-}
-
 pub(super) fn agent_icon(
     state: AgentState,
     seen: bool,
@@ -225,22 +215,6 @@ pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
     }
 }
 
-/// Format how long an agent has been working into a compact label:
-/// `8s`, `1m23s`, `1h02m` (seconds are dropped past the hour mark).
-pub(super) fn format_working_duration(elapsed: std::time::Duration) -> String {
-    let total = elapsed.as_secs();
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}h{minutes:02}m")
-    } else if minutes > 0 {
-        format!("{minutes}m{seconds:02}s")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> Color {
     match (state, seen) {
         (AgentState::Blocked, _) => p.red,
@@ -255,20 +229,6 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
 mod tests {
     use super::*;
     use crate::config::{ToastClipboardPosition, ToastHerdrPosition};
-    use std::time::Duration;
-
-    #[test]
-    fn working_duration_formats_compactly() {
-        assert_eq!(format_working_duration(Duration::from_secs(0)), "0s");
-        assert_eq!(format_working_duration(Duration::from_secs(8)), "8s");
-        assert_eq!(format_working_duration(Duration::from_secs(59)), "59s");
-        assert_eq!(format_working_duration(Duration::from_secs(60)), "1m00s");
-        assert_eq!(format_working_duration(Duration::from_secs(83)), "1m23s");
-        assert_eq!(format_working_duration(Duration::from_secs(3600)), "1h00m");
-        assert_eq!(format_working_duration(Duration::from_secs(3720)), "1h02m");
-        // Sub-second remainders truncate toward the lower unit.
-        assert_eq!(format_working_duration(Duration::from_millis(1500)), "1s");
-    }
 
     fn toast() -> ToastNotification {
         ToastNotification {

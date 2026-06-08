@@ -1,8 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use super::{
     state::{WorktreeCreateState, WorktreeOpenEntry, WorktreeOpenState, WorktreeRemoveState},
     App, Mode,
@@ -120,7 +118,7 @@ impl App {
             error: None,
             creating: false,
         });
-        self.state.mode = Mode::NewLinkedWorktree;
+        self.state.mode = Mode::Home;
     }
 
     pub(crate) fn open_remove_linked_worktree_confirmation(&mut self, ws_idx: usize) {
@@ -147,7 +145,7 @@ impl App {
             removing: false,
             force_confirmation: false,
         });
-        self.state.mode = Mode::ConfirmRemoveWorktree;
+        self.state.mode = Mode::Home;
     }
 
     pub(crate) fn open_existing_worktree_dialog(&mut self, ws_idx: usize) {
@@ -229,104 +227,7 @@ impl App {
             search_focused: false,
             error: None,
         });
-        self.state.mode = Mode::OpenExistingWorktree;
-    }
-
-    pub(crate) fn handle_worktree_create_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                if self
-                    .state
-                    .worktree_create
-                    .as_ref()
-                    .is_some_and(|create| create.creating)
-                {
-                    return;
-                }
-                self.close_worktree_create_dialog();
-            }
-            KeyCode::Enter => self.start_worktree_add(),
-            KeyCode::Backspace => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                } else {
-                    self.state.name_input.pop();
-                }
-                self.sync_worktree_branch_from_input();
-            }
-            KeyCode::Char(c) => {
-                if self.state.name_input_replace_on_type {
-                    self.state.name_input.clear();
-                    self.state.name_input_replace_on_type = false;
-                }
-                self.state.name_input.push(c);
-                self.sync_worktree_branch_from_input();
-            }
-            _ => {}
-        }
-    }
-
-    pub(crate) fn handle_worktree_open_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.state.worktree_open = None;
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
-            KeyCode::Up => {
-                if let Some(open) = &mut self.state.worktree_open {
-                    open.select_previous_filtered();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(open) = &mut self.state.worktree_open {
-                    open.select_next_filtered();
-                }
-            }
-            KeyCode::Char('/') => {
-                if let Some(open) = &mut self.state.worktree_open {
-                    if open.search_focused {
-                        open.query.push('/');
-                        open.normalize_selection();
-                    } else {
-                        open.search_focused = true;
-                    }
-                }
-            }
-            KeyCode::Char(ch)
-                if self
-                    .state
-                    .worktree_open
-                    .as_ref()
-                    .is_some_and(|open| open.search_focused)
-                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-            {
-                if let Some(open) = &mut self.state.worktree_open {
-                    if !ch.is_control() {
-                        open.query.push(ch);
-                        open.normalize_selection();
-                    }
-                }
-            }
-            KeyCode::Backspace
-                if self
-                    .state
-                    .worktree_open
-                    .as_ref()
-                    .is_some_and(|open| open.search_focused) =>
-            {
-                if let Some(open) = &mut self.state.worktree_open {
-                    open.query.pop();
-                    open.normalize_selection();
-                }
-            }
-            KeyCode::Enter => self.open_selected_existing_worktree(),
-            _ => {}
-        }
+        self.state.mode = Mode::Home;
     }
 
     pub(crate) fn open_selected_existing_worktree(&mut self) {
@@ -360,7 +261,7 @@ impl App {
                 entry.is_linked_worktree,
             );
             self.state.switch_workspace(ws_idx);
-            self.state.mode = Mode::Terminal;
+            self.state.mode = Mode::Home;
             return;
         }
 
@@ -392,7 +293,7 @@ impl App {
                     search_focused: false,
                     error: Some(format!("failed to open worktree: {err}")),
                 });
-                self.state.mode = Mode::OpenExistingWorktree;
+                self.state.mode = Mode::Home;
             }
         }
     }
@@ -441,17 +342,6 @@ impl App {
             });
         }
         self.state.mark_session_dirty();
-    }
-
-    fn close_worktree_create_dialog(&mut self) {
-        self.state.worktree_create = None;
-        self.state.name_input.clear();
-        self.state.name_input_replace_on_type = false;
-        self.state.mode = if self.state.active.is_some() {
-            Mode::Terminal
-        } else {
-            Mode::Navigate
-        };
     }
 
     fn sync_worktree_branch_from_input(&mut self) {
@@ -522,29 +412,6 @@ impl App {
                 result,
             }));
         });
-    }
-
-    pub(crate) fn handle_worktree_remove_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                if self
-                    .state
-                    .worktree_remove
-                    .as_ref()
-                    .is_some_and(|remove| remove.removing)
-                {
-                    return;
-                }
-                self.state.worktree_remove = None;
-                self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
-                } else {
-                    Mode::Navigate
-                };
-            }
-            KeyCode::Enter => self.start_worktree_remove(),
-            _ => {}
-        }
     }
 
     pub(crate) fn start_worktree_remove(&mut self) {
@@ -630,7 +497,7 @@ impl App {
                         self.state.config_diagnostic = Some(format!(
                             "created worktree but failed to open workspace: {err}"
                         ));
-                        self.state.mode = Mode::Navigate;
+                        self.state.mode = Mode::Home;
                     }
                 }
                 self.render_dirty.store(true, Ordering::Release);
@@ -674,9 +541,9 @@ impl App {
                     }
                 }
                 self.state.mode = if self.state.active.is_some() {
-                    Mode::Terminal
+                    Mode::Home
                 } else {
-                    Mode::Navigate
+                    Mode::Home
                 };
                 self.render_dirty.store(true, Ordering::Release);
                 self.render_notify.notify_one();
@@ -803,73 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn worktree_open_search_filters_entries() {
-        let mut app = app_for_worktree_tests();
-        app.state.worktree_open = Some(WorktreeOpenState {
-            source_workspace_id: "source".into(),
-            source_existing_membership: None,
-            source_checkout_path: "/repo/herdr".into(),
-            source_repo_root: "/repo/herdr".into(),
-            repo_key: "repo-key".into(),
-            repo_name: "herdr".into(),
-            entries: vec![
-                WorktreeOpenEntry {
-                    path: "/repo/herdr".into(),
-                    branch: Some("main".into()),
-                    is_linked_worktree: false,
-                    already_open_ws_idx: Some(0),
-                },
-                WorktreeOpenEntry {
-                    path: "/repo/fd-cleanup".into(),
-                    branch: Some("fd-cleanup".into()),
-                    is_linked_worktree: true,
-                    already_open_ws_idx: None,
-                },
-                WorktreeOpenEntry {
-                    path: "/repo/bell-forward-macos-bounce".into(),
-                    branch: Some("bell-forward-macos-bounce".into()),
-                    is_linked_worktree: true,
-                    already_open_ws_idx: None,
-                },
-            ],
-            selected: 0,
-            query: String::new(),
-            search_focused: false,
-            error: None,
-        });
-
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('/'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('f'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('d'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('-'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-        app.handle_worktree_open_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('l'),
-            crossterm::event::KeyModifiers::empty(),
-        ));
-
-        let open = app.state.worktree_open.as_ref().unwrap();
-        assert_eq!(open.query, "fd-cl");
-        assert_eq!(open.filtered_indices(), vec![1]);
-        assert_eq!(open.selected_entry_index(), Some(1));
-    }
-
-    #[test]
     fn open_existing_worktree_detects_already_open_checkout_from_subdirectory() {
         let repo = create_committed_repo("app-worktree-open-existing-repo");
         let checkout = unique_temp_path("app-worktree-open-existing-checkout");
@@ -912,7 +712,7 @@ mod tests {
     fn worktree_create_and_open_dialogs_reject_linked_child_source() {
         let mut app = app_for_worktree_tests();
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("issue")];
-        app.state.mode = Mode::Navigate;
+        app.state.mode = Mode::Home;
         app.state.workspaces[0].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: "repo-key".into(),
             label: "herdr".into(),
@@ -923,7 +723,7 @@ mod tests {
 
         app.open_new_linked_worktree_dialog(0);
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.mode, Mode::Home);
         assert!(app.state.worktree_create.is_none());
         assert_eq!(
             app.state.config_diagnostic.as_deref(),
@@ -1031,7 +831,7 @@ mod tests {
 
         app.open_new_linked_worktree_dialog(0);
 
-        assert_eq!(app.state.mode, Mode::NewLinkedWorktree);
+        assert_eq!(app.state.mode, Mode::Home);
         assert!(app.state.config_diagnostic.is_none());
         let create = app.state.worktree_create.as_ref().unwrap();
         assert_eq!(create.source_checkout_path, bare);

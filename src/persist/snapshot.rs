@@ -495,7 +495,7 @@ mod tests {
         if !state.workspaces.is_empty() {
             state.active = Some(0);
             state.selected = 0;
-            state.mode = Mode::Terminal;
+            state.mode = Mode::Home;
         }
         state
     }

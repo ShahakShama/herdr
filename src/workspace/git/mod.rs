@@ -10,7 +10,8 @@ mod test_support;
 pub use self::{
     discovery::{derive_label_from_cwd, git_branch, git_space_metadata, GitSpaceMetadata},
     repos::{
-        default_scan_root, list_branches, review_base, scan_repositories, Branch, Repository,
+        default_scan_root, list_review_branches, review_base, scan_repositories, Branch,
+        Repository,
     },
     status::{git_status_cache_key, git_status_snapshot_for_cwd, GitStatusCacheEntry},
 };

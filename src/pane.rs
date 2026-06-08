@@ -1356,6 +1356,17 @@ impl PaneRuntime {
                         );
                     }
                 }
+                for direction in result.focus_signals {
+                    if let Err(err) =
+                        read_events.try_send(AppEvent::PaneFocusSignal { pane_id, direction })
+                    {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to queue pane focus signal"
+                        );
+                    }
+                }
                 PtyReadResult {
                     terminal_responses: result.terminal_responses,
                 }
@@ -1489,6 +1500,16 @@ impl PaneRuntime {
                             pane = pane_id.raw(),
                             err = %err,
                             "failed to send OSC 52 clipboard write"
+                        );
+                    }
+                }
+                for direction in result.focus_signals {
+                    if let Err(err) = events.try_send(AppEvent::PaneFocusSignal { pane_id, direction })
+                    {
+                        warn!(
+                            pane = pane_id.raw(),
+                            err = %err,
+                            "failed to send pane focus signal"
                         );
                     }
                 }
@@ -2121,6 +2142,34 @@ impl PaneRuntime {
             None
         }
     }
+
+    /// Whether vim/nvim is the program in the pane's foreground process group.
+    ///
+    /// The home UI uses this to decide whether Alt+h/j/k/l should drive vim's
+    /// window navigation (forwarded into the pane) instead of moving herdr's
+    /// own pane focus.
+    pub fn foreground_command_is_vim(&self) -> bool {
+        let pid = self.child_pid.load(Ordering::Acquire);
+        if pid == 0 {
+            return false;
+        }
+        crate::detect::foreground_job(pid)
+            .is_some_and(|job| job.processes.iter().any(process_is_vim))
+    }
+}
+
+fn process_is_vim(process: &crate::platform::ForegroundProcess) -> bool {
+    [Some(process.name.as_str()), process.argv0.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|raw| {
+            let base = raw.rsplit('/').next().unwrap_or(raw);
+            let base = base.strip_suffix(".exe").unwrap_or(base);
+            matches!(
+                base.to_ascii_lowercase().as_str(),
+                "vim" | "nvim" | "gvim" | "vimdiff" | "nvimdiff" | "view" | "vi" | "rvim"
+            )
+        })
 }
 
 #[cfg(test)]
@@ -2199,6 +2248,24 @@ mod tests {
     #[test]
     fn shutdown_liveness_treats_reaped_direct_child_as_gone() {
         assert!(!process_alive_for_shutdown(42, 42, true, |_| true));
+    }
+
+    #[test]
+    fn process_is_vim_matches_known_editors_by_name_and_path() {
+        let proc = |name: &str, argv0: Option<&str>| crate::platform::ForegroundProcess {
+            pid: 1,
+            name: name.to_string(),
+            argv0: argv0.map(str::to_string),
+            argv: None,
+            cmdline: None,
+        };
+        assert!(process_is_vim(&proc("nvim", None)));
+        assert!(process_is_vim(&proc("vim", None)));
+        // comm can be empty/truncated while argv0 carries the real path.
+        assert!(process_is_vim(&proc("node", Some("/usr/local/bin/nvim"))));
+        assert!(process_is_vim(&proc("vimdiff", None)));
+        assert!(!process_is_vim(&proc("bash", None)));
+        assert!(!process_is_vim(&proc("vimtutor", None)));
     }
 
     #[test]

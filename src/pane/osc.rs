@@ -359,6 +359,98 @@ impl Osc52Forwarder {
     }
 }
 
+/// Body prefix of herdr's private focus-navigation OSC: `ESC ] 5379;focus=<dir> BEL`.
+/// vim emits this (see the vimrc plugin) when Alt+h/j/k/l has no window to move
+/// to, so herdr can move its own pane focus instead.
+const HERDR_FOCUS_OSC_PREFIX: &[u8] = b"5379;focus=";
+const HERDR_FOCUS_MAX_BODY_BYTES: usize = 64;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum HerdrFocusScanState {
+    #[default]
+    Ground,
+    Escape,
+    OscBody,
+    OscEscape,
+}
+
+/// Scans raw PTY output for herdr's private focus OSC. `libghostty-vt` drops
+/// the unknown OSC silently, so we reconstruct it ourselves and hand the parsed
+/// direction to the main loop.
+#[derive(Debug, Default)]
+pub(super) struct HerdrFocusSignalTracker {
+    state: HerdrFocusScanState,
+    body: Vec<u8>,
+    pending: Vec<crate::events::PaneFocusDirection>,
+}
+
+impl HerdrFocusSignalTracker {
+    pub(super) fn observe(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            match self.state {
+                HerdrFocusScanState::Ground => {
+                    if byte == 0x1b {
+                        self.state = HerdrFocusScanState::Escape;
+                    }
+                }
+                HerdrFocusScanState::Escape => {
+                    if byte == b']' {
+                        self.body.clear();
+                        self.state = HerdrFocusScanState::OscBody;
+                    } else if byte == 0x1b {
+                        self.state = HerdrFocusScanState::Escape;
+                    } else {
+                        self.state = HerdrFocusScanState::Ground;
+                    }
+                }
+                HerdrFocusScanState::OscBody => match byte {
+                    0x07 => {
+                        self.finalize();
+                        self.state = HerdrFocusScanState::Ground;
+                    }
+                    0x1b => self.state = HerdrFocusScanState::OscEscape,
+                    _ => self.body.push(byte),
+                },
+                HerdrFocusScanState::OscEscape => {
+                    // The only terminator we accept after ESC is ST (`\`); our
+                    // payload never embeds an ESC, so anything else aborts.
+                    if byte == b'\\' {
+                        self.finalize();
+                    }
+                    self.state = HerdrFocusScanState::Ground;
+                }
+            }
+
+            if self.body.len() > HERDR_FOCUS_MAX_BODY_BYTES {
+                self.body.clear();
+                self.state = HerdrFocusScanState::Ground;
+            }
+        }
+    }
+
+    fn finalize(&mut self) {
+        if let Some(direction) = parse_herdr_focus_signal(&self.body) {
+            self.pending.push(direction);
+        }
+        self.body.clear();
+    }
+
+    pub(super) fn drain_pending(&mut self) -> Vec<crate::events::PaneFocusDirection> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+fn parse_herdr_focus_signal(body: &[u8]) -> Option<crate::events::PaneFocusDirection> {
+    use crate::events::PaneFocusDirection;
+    match body.strip_prefix(HERDR_FOCUS_OSC_PREFIX)? {
+        b"h" => Some(PaneFocusDirection::Left),
+        b"j" => Some(PaneFocusDirection::Down),
+        b"k" => Some(PaneFocusDirection::Up),
+        b"l" => Some(PaneFocusDirection::Right),
+        _ => None,
+    }
+}
+
 /// Accepts `52;c;<base64>` and `52;;<base64>`.
 /// Queries (`?`) are rejected because herdr has no reply path.
 /// The payload must decode as base64 before it is forwarded.
@@ -841,6 +933,44 @@ mod tests {
         fw.observe(b"\x1b]52;c;aGk=\x07");
         assert_eq!(fw.drain_pending(), vec![b"hi".to_vec()]);
         assert!(fw.drain_pending().is_empty());
+    }
+
+    #[test]
+    fn herdr_focus_tracker_parses_each_direction() {
+        use crate::events::PaneFocusDirection;
+        let cases = [
+            (&b"\x1b]5379;focus=h\x07"[..], PaneFocusDirection::Left),
+            (&b"\x1b]5379;focus=j\x07"[..], PaneFocusDirection::Down),
+            (&b"\x1b]5379;focus=k\x07"[..], PaneFocusDirection::Up),
+            // ST (ESC \) terminator is accepted as well as BEL.
+            (&b"\x1b]5379;focus=l\x1b\\"[..], PaneFocusDirection::Right),
+        ];
+        for (bytes, expected) in cases {
+            let mut tracker = HerdrFocusSignalTracker::default();
+            tracker.observe(bytes);
+            assert_eq!(tracker.drain_pending(), vec![expected]);
+        }
+    }
+
+    #[test]
+    fn herdr_focus_tracker_handles_split_writes() {
+        let mut tracker = HerdrFocusSignalTracker::default();
+        tracker.observe(b"\x1b]5379;foc");
+        tracker.observe(b"us=h\x07");
+        assert_eq!(
+            tracker.drain_pending(),
+            vec![crate::events::PaneFocusDirection::Left]
+        );
+    }
+
+    #[test]
+    fn herdr_focus_tracker_ignores_unrelated_and_malformed_osc() {
+        let mut tracker = HerdrFocusSignalTracker::default();
+        // A real OSC 52 clipboard write, an unknown direction, and a bare title.
+        tracker.observe(b"\x1b]52;c;aGk=\x07");
+        tracker.observe(b"\x1b]5379;focus=x\x07");
+        tracker.observe(b"\x1b]0;some title\x07");
+        assert!(tracker.drain_pending().is_empty());
     }
 
     #[test]

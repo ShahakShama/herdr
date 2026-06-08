@@ -34,6 +34,10 @@ pub struct Branch {
     pub is_current: bool,
     /// Whether this came from `refs/remotes/*` with no matching local head.
     pub is_remote: bool,
+    /// Graphite stack graph art rendered before the name (`│ ◯  `), empty for the
+    /// flat fallback list. Lets the review picker show the stack's parent/child
+    /// connector lines.
+    pub graph_prefix: String,
 }
 
 /// The default directory scanned for repositories when none is configured.
@@ -122,6 +126,7 @@ pub fn list_branches(repo_root: &Path) -> Vec<Branch> {
                 name: short.to_string(),
                 is_current: false,
                 is_remote: true,
+                graph_prefix: String::new(),
             });
         } else {
             local_names.insert(short.to_string());
@@ -129,6 +134,7 @@ pub fn list_branches(repo_root: &Path) -> Vec<Branch> {
                 name: short.to_string(),
                 is_current: head == "*",
                 is_remote: false,
+                graph_prefix: String::new(),
             });
         }
     }
@@ -152,6 +158,87 @@ pub fn list_branches(repo_root: &Path) -> Vec<Branch> {
 
     locals.extend(remotes);
     locals
+}
+
+/// Branches for the review picker. When Graphite tracks a stack in `repo_root`,
+/// returns its `gt log short` graph (so the parent/child connector lines show);
+/// otherwise falls back to the flat [`list_branches`].
+pub fn list_review_branches(repo_root: &Path) -> Vec<Branch> {
+    if graphite_is_tracked(repo_root) {
+        let graph = graphite_log_branches(repo_root);
+        if !graph.is_empty() {
+            return graph;
+        }
+    }
+    list_branches(repo_root)
+}
+
+/// Whether Graphite already tracks branches in this repo (has `branch-metadata`
+/// refs). Gating the `gt` call on this avoids Graphite's interactive auto-setup
+/// in repos that don't use it.
+fn graphite_is_tracked(repo_root: &Path) -> bool {
+    git_command_stdout(
+        repo_root,
+        &["for-each-ref", "--count=1", "refs/branch-metadata"],
+    )
+    .map(|out| !out.trim().is_empty())
+    .unwrap_or(false)
+}
+
+/// Parse `gt log short` into branches, preserving each row's graph art as its
+/// `graph_prefix`. Returns empty if `gt` is unavailable or prints no graph rows.
+fn graphite_log_branches(repo_root: &Path) -> Vec<Branch> {
+    let output = match std::process::Command::new("gt")
+        .current_dir(repo_root)
+        .args(["log", "short"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let raw = match String::from_utf8(output.stdout) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    raw.lines().filter_map(parse_graphite_log_line).collect()
+}
+
+/// Split one `gt log short` row into its graph art prefix and branch name.
+/// Graph rows look like `│ ◯  feature/x (worktree)`; non-graph chatter (the
+/// auto-setup banner, blank lines) has no leading graph glyph and is dropped.
+fn parse_graphite_log_line(line: &str) -> Option<Branch> {
+    let line = line.trim_end();
+    // The branch name begins at the first non-graph, non-space character.
+    let name_start = line.char_indices().find(|(_, c)| !is_graph_glyph(*c))?.0;
+    if name_start == 0 {
+        // No leading graph art — this isn't a stack row.
+        return None;
+    }
+    let prefix = &line[..name_start];
+    // A real stack row carries a node glyph; indented non-graph text does not.
+    if !prefix.contains('◯') && !prefix.contains('◉') {
+        return None;
+    }
+    let rest = &line[name_start..];
+    let name = rest.split_whitespace().next().unwrap_or("");
+    if name.is_empty() {
+        return None;
+    }
+    Some(Branch {
+        name: name.to_string(),
+        // The filled node `◉` marks the checked-out branch.
+        is_current: prefix.contains('◉'),
+        is_remote: false,
+        graph_prefix: prefix.to_string(),
+    })
+}
+
+/// Whether `c` is part of Graphite's stack-graph drawing (box-drawing lines,
+/// the `◯`/`◉` nodes) or inter-column spacing.
+fn is_graph_glyph(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c as u32, 0x2500..=0x257F) // box drawing (│ ─ ┘ ┴ …)
+        || matches!(c as u32, 0x25A0..=0x25FF) // geometric shapes (◯ ◉)
 }
 
 /// Resolve the Graphite parent branch of `branch`, if Graphite tracks it.
@@ -291,6 +378,34 @@ mod tests {
         assert!(!branches[1].is_current);
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_graphite_log_short_graph_rows() {
+        // A root-of-stack row: node + name.
+        let top = parse_graphite_log_line("◯    shahak/contracts/09-ed25519-verify").unwrap();
+        assert_eq!(top.name, "shahak/contracts/09-ed25519-verify");
+        assert!(!top.is_current);
+        assert_eq!(top.graph_prefix, "◯    ");
+
+        // The checked-out branch uses the filled node `◉`.
+        let current = parse_graphite_log_line("◉    shahak/contracts/07").unwrap();
+        assert!(current.is_current);
+
+        // A row nested under a connector column, with a worktree annotation.
+        let nested =
+            parse_graphite_log_line("│ ◯  shahak/ts/04-test-runner (wt_frontend)").unwrap();
+        assert_eq!(nested.name, "shahak/ts/04-test-runner");
+        assert_eq!(nested.graph_prefix, "│ ◯  ");
+
+        // A merge/branch-point row with horizontal connectors.
+        let joined = parse_graphite_log_line("◯──┘  shahak/contracts/01-skeleton").unwrap();
+        assert_eq!(joined.name, "shahak/contracts/01-skeleton");
+
+        // Non-graph chatter (auto-setup banner, blanks) is dropped.
+        assert!(parse_graphite_log_line("Welcome to Graphite!").is_none());
+        assert!(parse_graphite_log_line("").is_none());
+        assert!(parse_graphite_log_line("Trunk set to master").is_none());
     }
 
     #[test]

@@ -295,10 +295,6 @@ impl TerminalRuntime {
         self.0.kitty_image_placements_with_data_filter(needs_data)
     }
 
-    pub fn keyboard_protocol(&self) -> crate::input::KeyboardProtocol {
-        self.0.keyboard_protocol()
-    }
-
     pub fn encode_terminal_key(&self, key: crate::input::TerminalKey) -> Vec<u8> {
         self.0.encode_terminal_key(key)
     }
@@ -366,6 +362,10 @@ impl TerminalRuntime {
 
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
         self.0.foreground_cwd()
+    }
+
+    pub fn foreground_command_is_vim(&self) -> bool {
+        self.0.foreground_command_is_vim()
     }
 
     pub(crate) fn current_size(&self) -> (u16, u16) {

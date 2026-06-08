@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 mod io;
-mod keybinds;
+pub(crate) mod keybinds;
 mod model;
 mod sound;
 mod theme;
@@ -13,8 +13,8 @@ pub use self::{
         upsert_section_value,
     },
     keybinds::{
-        format_key_combo, normalize_key_combo, terminal_key_matches_combo, ActionKeybinds,
-        BindingConfig, CommandKeybindConfig, CustomCommandAction, CustomCommandKeybind,
+        format_key_combo, terminal_key_matches_combo, ActionKeybinds,
+        BindingConfig, CommandKeybindConfig,
         IndexedKeybind, Keybinds, LiveKeybindConfig,
     },
     model::{

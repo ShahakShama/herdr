@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -26,30 +26,49 @@ pub(super) fn render_home_sidebar(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let p = &app.palette;
-
-    // Right-edge separator, accented while the left column has focus.
-    let left_focused = matches!(app.control.focus, FocusPane::Control | FocusPane::Agents);
-    let sep_style = if left_focused {
-        Style::default().fg(p.accent)
-    } else {
-        Style::default().fg(p.surface_dim)
-    };
-    let sep_x = area.x + area.width.saturating_sub(1);
-    let buf = frame.buffer_mut();
-    for y in area.y..area.y + area.height {
-        buf[(sep_x, y)].set_symbol("│");
-        buf[(sep_x, y)].set_style(sep_style);
-    }
-
     let _ = terminal_runtimes;
     let (control_area, agents_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+
+    // Each half is framed in a focus box: a THICK accent border when it holds
+    // focus, a plain dim border otherwise. The Review picker lives in the
+    // Control half, so it shares the Control focus state.
+    let control_inner =
+        render_home_pane_box(app, frame, control_area, app.control.focus == FocusPane::Control);
     if app.mode == Mode::Review {
-        render_review_half(app, frame, control_area);
+        render_review_half(app, frame, control_inner);
     } else {
-        render_control_half(app, frame, control_area);
+        render_control_half(app, frame, control_inner);
     }
-    render_agents_half(app, frame, agents_area);
+
+    let agents_inner =
+        render_home_pane_box(app, frame, agents_area, app.control.focus == FocusPane::Agents);
+    render_agents_half(app, frame, agents_inner);
+}
+
+/// Draw a focus box around a home sidebar half and return its inner rect.
+fn render_home_pane_box(app: &AppState, frame: &mut Frame, area: Rect, focused: bool) -> Rect {
+    if area.width < 2 || area.height < 2 {
+        return area;
+    }
+    let p = &app.palette;
+    let (style, border_set) = if focused {
+        (
+            Style::default().fg(p.accent),
+            ratatui::symbols::border::THICK,
+        )
+    } else {
+        (
+            Style::default().fg(p.surface_dim),
+            ratatui::symbols::border::PLAIN,
+        )
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(style)
+        .border_set(border_set);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 /// Top half while reviewing: a branch picker for the repository under review.
@@ -117,15 +136,34 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
             } else {
                 Style::default().fg(p.subtext0)
             };
-            let marker = if branch.is_current { "● " } else { "  " };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
+            // With Graphite's stack graph, show its connector art (`│ ◯  `) and
+            // let the node convey the current branch; otherwise fall back to a
+            // simple `●` marker for the flat branch list.
+            let spans = if branch.graph_prefix.is_empty() {
+                let marker = if branch.is_current { "● " } else { "  " };
+                vec![
                     Span::styled(marker, Style::default().fg(p.green)),
                     Span::styled(
                         truncate(&branch.name, body.width.saturating_sub(3) as usize),
                         label_style,
                     ),
-                ]))
+                ]
+            } else {
+                let prefix_w = branch.graph_prefix.chars().count();
+                let avail = (body.width as usize).saturating_sub(1 + prefix_w);
+                let node_style = if branch.is_current {
+                    Style::default().fg(p.green)
+                } else {
+                    Style::default().fg(p.overlay0)
+                };
+                vec![
+                    Span::styled(" ", Style::default()),
+                    Span::styled(branch.graph_prefix.clone(), node_style),
+                    Span::styled(truncate(&branch.name, avail), label_style),
+                ]
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(spans))
                 .style(if selected {
                     Style::default().bg(p.surface0)
                 } else {
@@ -155,11 +193,6 @@ fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
     let focused = app.control.focus == FocusPane::Agents;
     let dim = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
 
-    let separator = "─".repeat(area.width as usize);
-    frame.render_widget(
-        Paragraph::new(Span::styled(separator, Style::default().fg(p.surface_dim))),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
     let header_style = if focused {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
@@ -167,10 +200,26 @@ fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(" agents", header_style))),
-        Rect::new(area.x, area.y + 1, area.width, 1),
+        Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let body = Rect::new(area.x, area.y + 2, area.width, area.height.saturating_sub(2));
+    // Reserve the bottom row for an action hint when this pane has focus.
+    let reserve_footer = focused && area.height >= 4;
+    let body_height = area
+        .height
+        .saturating_sub(1)
+        .saturating_sub(u16::from(reserve_footer));
+    let body = Rect::new(area.x, area.y + 1, area.width, body_height);
+    if reserve_footer {
+        let hint_y = area.y + area.height.saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " r rename · x kill · p pr",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ))),
+            Rect::new(area.x, hint_y, area.width, 1),
+        );
+    }
     if body.height == 0 {
         return;
     }
@@ -367,7 +416,7 @@ fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {
         let hint_y = area.y + area.height.saturating_sub(1);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " n new · r review",
+                " n new · t term · r review",
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
             ))),
             Rect::new(area.x, hint_y, area.width, 1),
@@ -424,6 +473,61 @@ pub(super) fn render_create_agent_overlay(app: &AppState, frame: &mut Frame, are
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "enter create · esc cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        rows[2],
+    );
+}
+
+/// Modal form for renaming the selected agent (and its worktree directory).
+pub(super) fn render_rename_agent_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    super::dim_background(frame, area);
+    let p = &app.palette;
+
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 56, 7, p) else {
+        return;
+    };
+    if inner.height < 3 {
+        return;
+    }
+
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "rename agent",
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        ))),
+        rows[0],
+    );
+
+    let (input_text, input_style) = if app.name_input.is_empty() {
+        (
+            "name…".to_string(),
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        )
+    } else if app.name_input_replace_on_type {
+        (
+            app.name_input.clone(),
+            Style::default().fg(p.text).bg(p.surface0),
+        )
+    } else {
+        (app.name_input.clone(), Style::default().fg(p.text))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(input_text, input_style))),
+        rows[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter rename · esc cancel",
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
         ))),
         rows[2],

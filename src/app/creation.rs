@@ -41,12 +41,6 @@ impl App {
     }
 
     pub(super) fn workspace_creation_source(&self) -> Option<usize> {
-        if self.state.mode == Mode::Navigate
-            && self.state.workspaces.get(self.state.selected).is_some()
-        {
-            return Some(self.state.selected);
-        }
-
         self.state.active.or_else(|| {
             self.state
                 .workspaces
@@ -63,7 +57,7 @@ impl App {
         let initial_cwd = self.resolve_new_terminal_cwd(follow_cwd);
         if let Err(e) = self.create_workspace_with_options(initial_cwd, true) {
             error!(err = %e, "failed to create workspace");
-            self.state.mode = Mode::Navigate;
+            self.state.mode = Mode::Home;
         }
     }
 
@@ -119,7 +113,7 @@ impl App {
         self.state.remove_alias_shadowed_by_new_pane(root_pane);
         if focus {
             self.state.switch_workspace_tab(ws_idx, idx);
-            self.state.mode = Mode::Terminal;
+            self.state.mode = Mode::Home;
         }
         let workspace_id = self.state.workspaces[ws_idx].id.clone();
         let tab_id = self
@@ -159,12 +153,6 @@ impl App {
         crate::logging::workspace_created(&workspace_id, root_pane);
         if focus || self.state.active.is_none() {
             self.state.switch_workspace(idx);
-            // Terminal is only the post-creation default for the legacy layout.
-            // While the keyboard-first home is showing, stay on it — switching to
-            // Terminal here would silently drop the user into the old UI.
-            if !self.state.mode.is_home_surface() {
-                self.state.mode = Mode::Terminal;
-            }
         }
         self.schedule_session_save();
         Ok(idx)

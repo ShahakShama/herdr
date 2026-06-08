@@ -1,5 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::{
     app::{
@@ -311,173 +310,11 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
     state.mode = Mode::Settings;
 }
 
-impl AppState {
-    fn settings_popup_rect(&self) -> Rect {
-        crate::ui::centered_popup_rect(self.screen_rect(), 76, 22).unwrap_or_default()
-    }
-
-    fn settings_inner_rect(&self) -> Rect {
-        let popup = self.settings_popup_rect();
-        Rect::new(
-            popup.x + 1,
-            popup.y + 1,
-            popup.width.saturating_sub(2),
-            popup.height.saturating_sub(2),
-        )
-    }
-
-    fn settings_tab_at(&self, col: u16, row: u16) -> Option<SettingsSection> {
-        let inner = self.settings_inner_rect();
-        let tab_y = inner.y + 1;
-        if row != tab_y {
-            return None;
-        }
-        let mut x = inner.x;
-        for section in SettingsSection::ALL {
-            let badge_width = if self.settings_section_has_badge(*section) {
-                2
-            } else {
-                0
-            };
-            let width = section.label().len() as u16 + 2 + badge_width;
-            if col >= x && col < x + width {
-                return Some(*section);
-            }
-            x += width + 1;
-        }
-        None
-    }
-
-    pub(crate) fn settings_content_rect(&self) -> Rect {
-        let inner = self.settings_inner_rect();
-        crate::ui::modal_stack_areas(inner, 3, 2, 0, 1).content
-    }
-
-    fn settings_list_index_at(&self, col: u16, row: u16) -> Option<usize> {
-        let area = self.settings_content_rect();
-        if row < area.y || row >= area.y + area.height || col < area.x || col >= area.x + area.width
-        {
-            return None;
-        }
-
-        match self.settings.section {
-            SettingsSection::Theme => {
-                let max_visible = area.height as usize;
-                let scroll = if self.settings.list.selected >= max_visible {
-                    self.settings.list.selected - max_visible + 1
-                } else {
-                    0
-                };
-                let idx = scroll + (row - area.y) as usize;
-                (idx < THEME_NAMES.len()).then_some(idx)
-            }
-            SettingsSection::Sound => {
-                let list_y = area.y + 3;
-                if row >= list_y && row < list_y + 2 {
-                    Some((row - list_y) as usize)
-                } else {
-                    None
-                }
-            }
-            SettingsSection::Toast => {
-                let list_y = area.y + 3;
-                if row >= list_y && row < list_y + 8 {
-                    Some(((row - list_y) / 2) as usize)
-                } else {
-                    None
-                }
-            }
-            SettingsSection::PaneLabels => {
-                let list_y = area.y + 3;
-                if row >= list_y && row < list_y + 2 {
-                    Some((row - list_y) as usize)
-                } else {
-                    None
-                }
-            }
-            SettingsSection::Experiments => {
-                let list_y = area.y + 3;
-                if row >= list_y && row < list_y + ExperimentSetting::ALL.len() as u16 {
-                    Some((row - list_y) as usize)
-                } else {
-                    None
-                }
-            }
-            SettingsSection::Integrations => None,
-        }
-    }
-
-    pub(super) fn handle_settings_mouse(&mut self, mouse: MouseEvent) -> Option<SettingsAction> {
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(section) = self.settings_tab_at(mouse.column, mouse.row) {
-                    self.settings.section = section;
-                    self.settings.list.select(match section {
-                        SettingsSection::Theme => current_theme_index(&self.theme_name),
-                        SettingsSection::Sound => usize::from(!self.sound_enabled()),
-                        SettingsSection::Toast => toast_delivery_index(self.toast_delivery()),
-                        SettingsSection::PaneLabels => {
-                            usize::from(!self.agent_border_labels_enabled())
-                        }
-                        SettingsSection::Experiments => 0,
-                        SettingsSection::Integrations => 0,
-                    });
-                    return None;
-                }
-                if let Some(idx) = self.settings_list_index_at(mouse.column, mouse.row) {
-                    self.settings.list.select(idx);
-                    return match self.settings.section {
-                        SettingsSection::Theme => {
-                            preview_selected_theme(self);
-                            None
-                        }
-                        SettingsSection::Sound => {
-                            let enabled = idx == 0;
-                            Some(SettingsAction::SaveSound(enabled))
-                        }
-                        SettingsSection::Toast => {
-                            let delivery = toast_delivery_for_index(idx);
-                            Some(SettingsAction::SaveToastDelivery(delivery))
-                        }
-                        SettingsSection::PaneLabels => {
-                            let enabled = idx == 0;
-                            Some(SettingsAction::SaveAgentBorderLabels(enabled))
-                        }
-                        SettingsSection::Experiments => experiment_toggle_action(self, idx),
-                        SettingsSection::Integrations => None,
-                    };
-                }
-
-                let inner = self.settings_inner_rect();
-                let show_primary = crate::ui::settings_show_primary_action(self);
-                let (apply, close) =
-                    crate::ui::settings_button_rects(inner, self.settings.section, show_primary);
-                let mut buttons = vec![(close, super::modal::ModalAction::Close)];
-                if let Some(apply) = apply {
-                    buttons.insert(0, (apply, super::modal::ModalAction::Apply));
-                }
-                match super::modal::modal_action_from_buttons(mouse.column, mouse.row, &buttons) {
-                    Some(super::modal::ModalAction::Apply) => apply_settings(self),
-                    Some(super::modal::ModalAction::Close) => {
-                        cancel_settings(self);
-                        None
-                    }
-                    _ => {
-                        cancel_settings(self);
-                        None
-                    }
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    use super::super::{app_for_mouse_test, mouse, state_with_workspaces};
+    use super::super::state_with_workspaces;
     use super::*;
 
     #[test]
@@ -507,7 +344,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.mode, Mode::Home);
         assert_eq!(state.theme_name, original_theme);
         assert_eq!(state.palette.accent, original_palette.accent);
         assert_eq!(state.palette.panel_bg, original_palette.panel_bg);
@@ -624,55 +461,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_hover_does_not_change_selection() {
-        let mut app = app_for_mouse_test();
-        open_settings(&mut app.state);
-        app.state.settings.list.select(0);
-
-        let area = app.state.settings_content_rect();
-        app.handle_mouse(mouse(MouseEventKind::Moved, area.x + 2, area.y + 2));
-
-        assert_eq!(app.state.settings.list.selected, 0);
-    }
-
-    #[test]
-    fn settings_mouse_click_toggles_pane_history() {
-        let mut app = app_for_mouse_test();
-        app.state.pane_history_persistence = false;
-        open_settings_at(&mut app.state, SettingsSection::Experiments);
-
-        let area = app.state.settings_content_rect();
-        let action = app.state.handle_settings_mouse(mouse(
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            area.x + 2,
-            area.y + 3,
-        ));
-
-        assert_eq!(action, Some(SettingsAction::SavePaneHistory(true)));
-        assert_eq!(app.state.settings.list.selected, 0);
-    }
-
-    #[test]
-    fn settings_mouse_click_toggles_switch_ascii_input_source_row() {
-        let mut app = app_for_mouse_test();
-        app.state.switch_ascii_input_source_in_prefix = false;
-        open_settings_at(&mut app.state, SettingsSection::Experiments);
-
-        let area = app.state.settings_content_rect();
-        let action = app.state.handle_settings_mouse(mouse(
-            MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            area.x + 2,
-            area.y + 4,
-        ));
-
-        assert_eq!(
-            action,
-            Some(SettingsAction::SaveSwitchAsciiInputSourceInPrefix(true))
-        );
-        assert_eq!(app.state.settings.list.selected, 1);
-    }
-
-    #[test]
     fn integration_update_badge_only_tracks_outdated_recommendations() {
         let mut state = state_with_workspaces(&["test"]);
         state.integration_recommendations = vec![integration_recommendation(
@@ -698,41 +486,6 @@ mod tests {
             true,
         )];
         assert!(state.integration_updates_available());
-    }
-
-    #[test]
-    fn settings_tab_hit_area_includes_integration_update_badge() {
-        let mut state = state_with_workspaces(&["test"]);
-        state.integration_recommendations = vec![integration_recommendation(
-            crate::integration::IntegrationStatusKind::Outdated,
-            true,
-        )];
-        open_settings(&mut state);
-
-        let inner = state.settings_inner_rect();
-        let tab_y = inner.y + 1;
-        let integrations_idx = SettingsSection::ALL
-            .iter()
-            .position(|section| *section == SettingsSection::Integrations)
-            .expect("integrations section should be present");
-        let integrations_x = inner.x
-            + SettingsSection::ALL[..integrations_idx]
-                .iter()
-                .map(|section| {
-                    let badge_width = if state.settings_section_has_badge(*section) {
-                        2
-                    } else {
-                        0
-                    };
-                    section.label().len() as u16 + 3 + badge_width
-                })
-                .sum::<u16>();
-        let dotted_width = SettingsSection::Integrations.label().len() as u16 + 4;
-
-        assert_eq!(
-            state.settings_tab_at(integrations_x + dotted_width - 1, tab_y),
-            Some(SettingsSection::Integrations)
-        );
     }
 
     fn integration_recommendation(

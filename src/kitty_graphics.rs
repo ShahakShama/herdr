@@ -10,7 +10,6 @@ use base64::Engine;
 use ratatui::layout::Rect;
 
 use crate::app::state::AppState;
-use crate::app::Mode;
 use crate::ghostty::{KittyImageDescriptor, KittyImageFormat, KittyImagePlacement};
 use crate::layout::PaneId;
 use crate::terminal::TerminalRuntimeRegistry;
@@ -126,6 +125,13 @@ pub(crate) struct HostGraphicsCache {
 static KITTY_GRAPHICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static LOCAL_HOST_GRAPHICS: OnceLock<Mutex<HostGraphicsCache>> = OnceLock::new();
 
+/// Test-only serialization lock. The kitty-enabled flag above is a process
+/// global that pane rendering reads, so a test that toggles it via
+/// [`set_enabled`] must not run concurrently with tests that assert exact
+/// render/retained-frame output. Such tests take this lock for their duration.
+#[cfg(test)]
+pub(crate) static RENDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn set_enabled(enabled: bool) {
     KITTY_GRAPHICS_ENABLED.store(enabled, Ordering::Release);
 }
@@ -164,7 +170,7 @@ pub(crate) fn encode_local_pane_graphics(
     cell_size: HostCellSize,
     cache: &mut HostGraphicsCache,
 ) -> Vec<u8> {
-    let mode_ok = app.mode == Mode::Terminal;
+    let mode_ok = app.main_focused();
     let cell_ok = cell_size.is_known();
     tracing::debug!(
         mode_ok,
@@ -220,7 +226,7 @@ pub(crate) fn has_visible_pane_graphics(
     terminal_runtimes: &TerminalRuntimeRegistry,
     cell_size: HostCellSize,
 ) -> bool {
-    if app.mode != Mode::Terminal || !cell_size.is_known() {
+    if !app.main_focused() || !cell_size.is_known() {
         return false;
     }
 

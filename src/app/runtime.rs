@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::terminal;
 
 use super::{
-    auto_updates_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
+    auto_updates_enabled, repeat_key_identity, App, ANIMATION_INTERVAL,
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
@@ -107,7 +107,7 @@ impl App {
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
-                        if self.state.mode == Mode::Terminal {
+                        if self.state.main_focused() {
                             self.suppressed_repeat_keys.remove(&key_id);
                         } else {
                             self.suppressed_repeat_keys.insert(key_id);
@@ -116,7 +116,7 @@ impl App {
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
+                        if self.state.main_focused()
                             && !self.suppressed_repeat_keys.contains(&key_id)
                         {
                             self.handle_key(key).await;
@@ -136,12 +136,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                if self.state.mouse_capture {
-                    self.handle_mouse(mouse);
-                } else {
-                    self.state
-                        .handle_pane_mouse_only(&self.terminal_runtimes, mouse);
-                }
+                self.handle_mouse(mouse);
                 true
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {

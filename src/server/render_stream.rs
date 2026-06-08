@@ -4,7 +4,6 @@ use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::layout::{Position, Rect, Size};
 
 use crate::app::state::AppState;
-use crate::app::Mode;
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
 use crate::terminal::TerminalRuntimeRegistry;
@@ -341,7 +340,9 @@ pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<CursorState> {
-    if app_state.mode != Mode::Terminal {
+    // Show the focused pane's cursor in the keyboard-first home surface when
+    // Main has focus (keys are forwarded to the agent pane just like a terminal).
+    if !app_state.main_focused() {
         return None;
     }
 

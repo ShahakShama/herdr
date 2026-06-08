@@ -16,21 +16,79 @@ impl App {
     /// phase) forwards unconsumed keys to the focused agent pane when Main has
     /// focus.
     pub(super) async fn handle_home_key(&mut self, key: TerminalKey) {
+        // The decision logic is shared with the headless server path
+        // (`handle_home_key_headless`); only the byte-send differs (async here).
+        if self.dispatch_home_key(key) {
+            self.forward_key_to_main(key).await;
+        }
+    }
+
+    /// Headless-server variant of [`Self::handle_home_key`]: same routing, but
+    /// keys destined for Main are sent to the pane synchronously (the server has
+    /// no async context here). Without this, typing/PR/terminal commands in the
+    /// home surface are silently dropped by the headless input loop.
+    pub(crate) fn handle_home_key_headless(&mut self, key: TerminalKey) {
+        if self.dispatch_home_key(key) {
+            self.forward_key_to_main_headless(key);
+        }
+    }
+
+    /// Apply a home-surface key. Returns `true` when the caller should forward
+    /// the (unconsumed) key to the focused Main pane, `false` when it was fully
+    /// handled here. App-level commands (PR via `gh`, opening a terminal) run
+    /// directly; pure state changes go through [`AppState::apply_home_key`].
+    fn dispatch_home_key(&mut self, key: TerminalKey) -> bool {
+        let event = key.as_key_event();
         // `p` (plain in the agents pane, or alt+p anywhere) submits a PR for the
         // focused agent's branch; this runs `gh`, so it happens at the App level.
-        let event = key.as_key_event();
         if event.code == KeyCode::Char('p') && self.state.control.focus == FocusPane::Agents {
             self.submit_pr_for_selected_agent();
-            return;
+            return false;
+        }
+
+        // `t` in the Control pane opens a plain terminal in the selected repo.
+        // This spawns a shell, so it runs at the App level.
+        if event.code == KeyCode::Char('t') && self.state.control.focus == FocusPane::Control {
+            self.open_terminal_in_selected_repo();
+            return false;
+        }
+
+        // alt+s enters copy mode (keyboard scrollback + selection + yank) on the
+        // focused Main pane. enter_copy_mode needs the runtime registry, so it
+        // runs here at the App level rather than in `apply_home_key`.
+        if event.code == KeyCode::Char('s') && event.modifiers.contains(KeyModifiers::ALT) {
+            self.state.enter_copy_mode(&self.terminal_runtimes);
+            return false;
+        }
+
+        // With vim focused in Main, Alt+h/j/k/l drive vim's window navigation
+        // rather than herdr's pane focus. vim signals back (an OSC our vimrc
+        // emits, handled as AppEvent::PaneFocusSignal) when it has no window in
+        // that direction, so leaving the leftmost window returns to the sidebar.
+        if self.state.control.focus == FocusPane::Main
+            && event.modifiers.contains(KeyModifiers::ALT)
+            && matches!(event.code, KeyCode::Char('h' | 'j' | 'k' | 'l'))
+            && self.focused_main_is_vim()
+        {
+            return true;
         }
 
         if self.state.apply_home_key(key) {
-            return;
+            return false;
         }
         // Unconsumed keys with Main focused are typed into the agent pane.
-        if self.state.control.focus == FocusPane::Main {
-            self.forward_key_to_main(key).await;
-        }
+        self.state.control.focus == FocusPane::Main
+    }
+
+    /// Whether vim/nvim is the foreground program in the focused Main pane.
+    fn focused_main_is_vim(&self) -> bool {
+        self.state
+            .active
+            .and_then(|ws_idx| {
+                self.state
+                    .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            })
+            .is_some_and(|rt| rt.foreground_command_is_vim())
     }
 
     /// Encode and forward a key straight to the focused agent pane, bypassing the
@@ -64,6 +122,38 @@ impl App {
             let _ = sender.send_bytes(bytes::Bytes::from(bytes)).await;
         }
     }
+
+    /// Synchronous sibling of [`Self::forward_key_to_main`] for the headless
+    /// server input loop, which has no async context to `.await` the send.
+    fn forward_key_to_main_headless(&mut self, key: TerminalKey) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.focused_pane_id())
+        else {
+            return;
+        };
+        let bytes = {
+            let Some(rt) =
+                self.state
+                    .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            else {
+                return;
+            };
+            rt.scroll_reset();
+            rt.encode_terminal_key(key)
+        };
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(sender) = self.lookup_runtime_sender(ws_idx, pane_id) {
+            let _ = sender.try_send_bytes(bytes::Bytes::from(bytes));
+        }
+    }
 }
 
 impl AppState {
@@ -91,6 +181,11 @@ impl AppState {
             KeyCode::Char(',') if cmd => self.mode = Mode::Settings,
             KeyCode::Char('?') if cmd => self.mode = Mode::KeybindHelp,
             KeyCode::Char('n') if cmd => self.request_home_new_agent(),
+            // `r` renames the selected agent in the Agents pane, but opens the
+            // review branch-picker for the selected repo in the Control pane.
+            KeyCode::Char('r') if cmd && self.control.focus == FocusPane::Agents => {
+                self.request_home_rename_agent();
+            }
             KeyCode::Char('r') if cmd => self.request_home_review(),
             KeyCode::Char('x') if cmd => self.request_home_kill_agent(),
             KeyCode::Char('p') if cmd => self.request_home_submit_pr(),
@@ -103,6 +198,13 @@ impl AppState {
             KeyCode::Up if in_list => self.home_move_selection(-1),
             KeyCode::Down if in_list => self.home_move_selection(1),
             KeyCode::Enter if in_list => self.home_activate(),
+
+            // Vim-style navigation in the list panes: hjkl mirror the arrow keys.
+            // The lists are vertical, so h/l are inert just like Left/Right.
+            // (alt+h/j/k/l moved focus above, so these are the plain presses.)
+            KeyCode::Char('k') if in_list => self.home_move_selection(-1),
+            KeyCode::Char('j') if in_list => self.home_move_selection(1),
+            KeyCode::Char('h') | KeyCode::Char('l') if in_list => {}
 
             _ => return false,
         }
@@ -118,7 +220,7 @@ impl AppState {
         }
     }
 
-    fn home_focus_left(&mut self) {
+    pub(crate) fn home_focus_left(&mut self) {
         let target = match self.control.last_left {
             LeftHalf::Control => FocusPane::Control,
             LeftHalf::Agents => FocusPane::Agents,
@@ -191,7 +293,7 @@ impl AppState {
     fn request_home_review(&mut self) {
         // Open the branch picker for the selected repository.
         if let Some(repo) = self.control.selected_repository().cloned() {
-            let branches = crate::workspace::list_branches(&repo.root);
+            let branches = crate::workspace::list_review_branches(&repo.root);
             self.control.review = Some(ReviewState {
                 repo,
                 branches,
@@ -214,6 +316,23 @@ impl AppState {
         if self.home_agent_count() > 0 {
             self.mode = Mode::ConfirmKill;
         }
+    }
+
+    /// Open the rename form for the selected agent, prefilled with its current
+    /// name (selected for replace-on-first-keystroke).
+    fn request_home_rename_agent(&mut self) {
+        let entries = crate::ui::agent_panel_entries_all(self);
+        let Some(ws_idx) = entries.get(self.control.selected_agent).map(|e| e.ws_idx) else {
+            return;
+        };
+        let current = self
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| ws.display_name())
+            .unwrap_or_default();
+        self.name_input = current;
+        self.name_input_replace_on_type = true;
+        self.mode = Mode::RenameAgent;
     }
 
     /// Handle a key while confirming an agent kill.
@@ -442,11 +561,13 @@ mod tests {
                     name: "main".into(),
                     is_current: true,
                     is_remote: false,
+                    graph_prefix: String::new(),
                 },
                 crate::workspace::Branch {
                     name: "feat".into(),
                     is_current: false,
                     is_remote: false,
+                    graph_prefix: String::new(),
                 },
             ];
         }
@@ -456,6 +577,45 @@ mod tests {
         assert_eq!(state.control.review.as_ref().unwrap().selected, 1);
         state.review_move_selection(-5);
         assert_eq!(state.control.review.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn r_renames_in_agents_pane_but_reviews_in_control_pane() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.control.repos = vec![crate::workspace::Repository {
+            key: "a".into(),
+            root: "/a".into(),
+            label: "a".into(),
+        }];
+
+        // In the Control pane, `r` opens the review picker.
+        state.control.focus = FocusPane::Control;
+        assert!(state.apply_home_key(alt('r')));
+        assert_eq!(state.mode, Mode::Review);
+
+        // Set up a single agent so the Agents pane has a selection to rename.
+        state.mode = Mode::Home;
+        state.control.review = None;
+        state.workspaces = vec![crate::workspace::Workspace::test_new("a")];
+        state.ensure_test_terminals();
+        let terminal_id = {
+            let pane = state.workspaces[0].tabs[0].root_pane;
+            state.workspaces[0].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone()
+        };
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_name("agent0".into());
+
+        // In the Agents pane, `r` opens the rename form (prefilled).
+        state.control.focus = FocusPane::Agents;
+        assert!(state.apply_home_key(alt('r')));
+        assert_eq!(state.mode, Mode::RenameAgent);
+        assert!(state.name_input_replace_on_type);
     }
 
     #[test]
@@ -483,6 +643,41 @@ mod tests {
         state.control.focus = FocusPane::Main;
         assert!(!state.apply_home_key(plain(KeyCode::Char('n'))));
         assert_eq!(state.mode, Mode::Home);
+    }
+
+    #[test]
+    fn hjkl_navigate_like_arrows_in_list_panes() {
+        let mut state = AppState::test_new();
+        state.mode = Mode::Home;
+        state.control.repos = vec![
+            crate::workspace::Repository {
+                key: "a".into(),
+                root: "/a".into(),
+                label: "a".into(),
+            },
+            crate::workspace::Repository {
+                key: "b".into(),
+                root: "/b".into(),
+                label: "b".into(),
+            },
+        ];
+        state.control.focus = FocusPane::Control;
+
+        // `j` moves down, `k` moves up — mirroring Down/Up arrows.
+        assert!(state.apply_home_key(plain(KeyCode::Char('j'))));
+        assert_eq!(state.control.selected_repo, 1);
+        assert!(state.apply_home_key(plain(KeyCode::Char('k'))));
+        assert_eq!(state.control.selected_repo, 0);
+
+        // `h`/`l` are inert in the vertical lists, just like Left/Right.
+        assert!(state.apply_home_key(plain(KeyCode::Char('h'))));
+        assert!(state.apply_home_key(plain(KeyCode::Char('l'))));
+        assert_eq!(state.control.selected_repo, 0);
+
+        // With Main focused, plain hjkl fall through to the agent pane.
+        state.control.focus = FocusPane::Main;
+        assert!(!state.apply_home_key(plain(KeyCode::Char('j'))));
+        assert!(!state.apply_home_key(plain(KeyCode::Char('k'))));
     }
 
     #[test]

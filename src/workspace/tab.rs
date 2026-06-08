@@ -178,10 +178,6 @@ impl Tab {
             .unwrap_or_else(|| self.number.to_string())
     }
 
-    pub fn is_auto_named(&self) -> bool {
-        self.custom_name.is_none()
-    }
-
     pub fn set_custom_name(&mut self, name: String) {
         self.custom_name = Some(name);
     }
@@ -230,30 +226,6 @@ impl Tab {
             host_terminal_theme,
             shell_config,
             None,
-        )
-    }
-
-    pub fn split_focused_command(
-        &mut self,
-        direction: Direction,
-        rows: u16,
-        cols: u16,
-        cwd: Option<PathBuf>,
-        command: &str,
-        extra_env: &[(String, String)],
-        scrollback_limit_bytes: usize,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        self.split_focused_with_runtime(
-            direction,
-            None,
-            rows,
-            cols,
-            cwd,
-            scrollback_limit_bytes,
-            host_terminal_theme,
-            crate::pane::PaneShellConfig::new("", crate::config::ShellModeConfig::NonLogin),
-            Some(SplitCommand::Shell { command, extra_env }),
         )
     }
 

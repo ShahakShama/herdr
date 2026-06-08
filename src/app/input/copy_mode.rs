@@ -174,11 +174,7 @@ impl AppState {
             self.set_pane_scroll_offset(terminal_runtimes, pane_id, offset_from_bottom);
         }
         self.copy_mode = None;
-        self.mode = if self.active.is_some() {
-            Mode::Terminal
-        } else {
-            Mode::Navigate
-        };
+        self.mode = Mode::Home;
     }
 
     fn begin_copy_mode_selection(&mut self, terminal_runtimes: &TerminalRuntimeRegistry) {
@@ -690,7 +686,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.mode = Mode::Home;
         app.state.view.pane_infos = pane_infos;
         (app, pane_id)
     }
@@ -806,7 +802,7 @@ mod tests {
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()));
 
         assert_eq!(copy_mode_clipboard_text(&mut app), "beta");
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.mode, Mode::Home);
     }
 
     #[tokio::test]
@@ -978,7 +974,7 @@ mod tests {
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.mode, Mode::Home);
         assert!(app.state.copy_mode.is_none());
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), 0);
     }
@@ -998,7 +994,7 @@ mod tests {
 
         app.handle_copy_mode_key(TerminalKey::new(KeyCode::Char('q'), KeyModifiers::empty()));
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.mode, Mode::Home);
         assert!(app.state.copy_mode.is_none());
         assert_eq!(copy_mode_offset_from_bottom(&app, pane_id), entry_offset);
     }
@@ -1045,7 +1041,7 @@ mod tests {
             AppEvent::ClipboardWrite { content } => assert_eq!(content, b"alp"),
             other => panic!("unexpected event: {other:?}"),
         }
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.mode, Mode::Home);
         assert!(app.state.copy_mode.is_none());
     }
 }

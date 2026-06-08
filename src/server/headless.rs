@@ -474,7 +474,7 @@ impl HeadlessServer {
             if let Some(cwd) = self.app.state.request_new_workspace_cwd.take() {
                 if let Err(err) = self.app.create_workspace_with_options(cwd, true) {
                     error!(err = %err, "failed to create workspace at requested cwd");
-                    self.app.state.mode = app::Mode::Navigate;
+                    self.app.state.mode = app::Mode::Home;
                 }
                 needs_render = true;
                 needs_full_render = true;
@@ -2683,7 +2683,7 @@ impl HeadlessServer {
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
-        self.app.state.mode == app::Mode::Terminal
+        self.app.state.main_focused()
             && self.app.state.selection.is_none()
             && self.app.state.copy_mode.is_none()
             && self.app.state.context_menu.is_none()
@@ -3708,7 +3708,7 @@ mod tests {
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
 
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
         server.clients.insert(
@@ -4677,7 +4677,48 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
+        state.control.focus = crate::app::state::FocusPane::Main;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+        let pane = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("focused pane info");
+
+        assert_eq!(
+            cursor,
+            Some(CursorState {
+                x: pane.inner_rect.x + 4,
+                y: pane.inner_rect.y,
+                visible: true,
+                shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_render_shows_main_pane_cursor_in_home_surface() {
+        // Regression: in the keyboard-first home surface (Mode::Home) with Main
+        // focused, the focused agent pane's cursor must be reported to the client
+        // so the cursor box shows and tracks (e.g. moving in vim).
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.insert_test_runtime(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left"),
+        );
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Home;
+        state.control.focus = crate::app::state::FocusPane::Main;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4713,7 +4754,8 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
+        state.control.focus = crate::app::state::FocusPane::Main;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4750,7 +4792,8 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
+        state.control.focus = crate::app::state::FocusPane::Main;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4791,7 +4834,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
@@ -4827,7 +4870,8 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
+        state.control.focus = crate::app::state::FocusPane::Main;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4869,7 +4913,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4897,7 +4941,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
 
         let area = Rect::new(0, 0, 80, 24);
         let (_buffer, cursor) =
@@ -4922,7 +4966,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Navigate;
+        state.mode = crate::app::Mode::Home;
 
         let area = Rect::new(0, 0, 44, 24);
         let (_buffer, cursor) =
@@ -4947,7 +4991,7 @@ next_tab = ""
         state.workspaces = vec![ws];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = crate::app::Mode::Terminal;
+        state.mode = crate::app::Mode::Home;
 
         let area = Rect::new(0, 0, 80, 24);
         let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
@@ -5162,7 +5206,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.mode = crate::app::Mode::Home;
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -5183,7 +5227,7 @@ next_tab = ""
             data: b"\x1b".to_vec(),
         }));
 
-        assert_eq!(server.app.state.mode, crate::app::Mode::Terminal);
+        assert_eq!(server.app.state.mode, crate::app::Mode::Home);
     }
 
     #[tokio::test]
@@ -5197,7 +5241,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
         server.clients.insert(
             1,
             ClientConnection::new(
@@ -5249,7 +5293,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
 
         let (desktop_tx, _desktop_control_rx, desktop_rx) = test_client_writer();
         let (phone_tx, _phone_control_rx, phone_rx) = test_client_writer();
@@ -5309,7 +5353,7 @@ next_tab = ""
         server.app.state.workspaces = vec![workspace];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
 
         server.clients.insert(
             1,
@@ -5365,7 +5409,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
         server.app.terminal_runtimes.insert(
             terminal_id.clone(),
             crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
@@ -5822,7 +5866,7 @@ next_tab = ""
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
 
         let (client_tx, _client_control_rx, client_rx) = test_client_writer();
 
@@ -5855,7 +5899,11 @@ next_tab = ""
 
     #[tokio::test]
     async fn retained_pty_update_streams_dirty_row_from_last_frame() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.control.focus = crate::app::state::FocusPane::Main;
         server.render_and_stream();
         let first = read_server_frame(
             client_rx
@@ -5925,10 +5973,15 @@ next_tab = ""
 
     #[tokio::test]
     async fn retained_pty_update_matches_full_render_frame() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let initial = b"\x1b[6 qleft \xe4\xb8\xad";
         let update = b"\r\x1b[44mZ\x1b[0m";
         let (mut retained_server, retained_rx, retained_pane_id) = retained_test_server(initial);
+        retained_server.app.state.control.focus = crate::app::state::FocusPane::Main;
         let (mut full_server, full_rx, full_pane_id) = retained_test_server(initial);
+        full_server.app.state.control.focus = crate::app::state::FocusPane::Main;
 
         retained_server.render_and_stream();
         let _ = retained_rx
@@ -5974,10 +6027,15 @@ next_tab = ""
 
     #[tokio::test]
     async fn retained_pty_update_streams_cursor_only_change() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let initial = b"abcd";
         let update = b"\x1b[D";
         let (mut retained_server, retained_rx, retained_pane_id) = retained_test_server(initial);
+        retained_server.app.state.control.focus = crate::app::state::FocusPane::Main;
         let (mut full_server, full_rx, full_pane_id) = retained_test_server(initial);
+        full_server.app.state.control.focus = crate::app::state::FocusPane::Main;
 
         retained_server.render_and_stream();
         let _ = retained_rx
@@ -6036,11 +6094,12 @@ next_tab = ""
             .expect("runtime");
         runtime.test_process_pty_bytes(b"\rZ");
 
-        server.app.state.mode = crate::app::Mode::Navigate;
+        server.app.state.mode = crate::app::Mode::Home;
         assert!(!server.render_retained_pty_update_and_stream());
         assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
 
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
+        server.app.state.control.focus = crate::app::state::FocusPane::Main;
         assert!(server.render_retained_pty_update_and_stream());
         let patched = read_server_frame(
             client_rx
@@ -6052,7 +6111,11 @@ next_tab = ""
 
     #[tokio::test]
     async fn headless_full_render_clears_full_redraw_pending_for_future_retained_updates() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.control.focus = crate::app::state::FocusPane::Main;
         server.app.full_redraw_pending = true;
 
         server.render_and_stream();
@@ -6115,7 +6178,11 @@ next_tab = ""
 
     #[tokio::test]
     async fn retained_pty_update_allows_kitty_enabled_empty_graphics_cache() {
+        let _render_guard = crate::kitty_graphics::RENDER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.app.state.control.focus = crate::app::state::FocusPane::Main;
         server.app.state.kitty_graphics_enabled = true;
         server.clients.get_mut(&1).unwrap().cell_size = crate::kitty_graphics::HostCellSize {
             width_px: 10,
@@ -6837,7 +6904,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
 
@@ -6926,7 +6993,7 @@ next_tab = ""
         server.app.state.ensure_test_terminals();
         server.app.state.active = Some(0);
         server.app.state.selected = 0;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
         server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
         server.app.state.toast_config.delay_seconds = 1;
 
@@ -7034,7 +7101,7 @@ next_tab = ""
             );
         server.app.state.active = Some(1);
         server.app.state.selected = 1;
-        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.mode = crate::app::Mode::Home;
 
         let (client_tx, client_control_rx, _client_rx) = test_client_writer();
         server.clients.insert(

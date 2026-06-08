@@ -69,69 +69,6 @@ pub(crate) fn scrollbar_thumb(
     })
 }
 
-pub(crate) fn scrollbar_thumb_grab_offset(
-    metrics: crate::pane::ScrollMetrics,
-    track: Rect,
-    row: u16,
-) -> Option<u16> {
-    let thumb = scrollbar_thumb(metrics, track)?;
-    (row >= thumb.top && row < thumb.top + thumb.len).then_some(row - thumb.top)
-}
-
-fn scrollbar_offset_from_thumb_top(
-    metrics: crate::pane::ScrollMetrics,
-    track: Rect,
-    thumb_top: usize,
-) -> usize {
-    if metrics.max_offset_from_bottom == 0 {
-        return 0;
-    }
-
-    let thumb_len = scrollbar_thumb(metrics, track)
-        .map(|thumb| thumb.len as usize)
-        .unwrap_or(1);
-    let max_thumb_top = track.height as usize - thumb_len.min(track.height as usize);
-    if max_thumb_top == 0 {
-        return 0;
-    }
-
-    let desired_top = thumb_top.min(max_thumb_top);
-    let scrolled_from_top = ((desired_top * metrics.max_offset_from_bottom) as f32
-        / max_thumb_top as f32)
-        .round() as usize;
-    metrics
-        .max_offset_from_bottom
-        .saturating_sub(scrolled_from_top)
-}
-
-pub(crate) fn scrollbar_offset_from_row(
-    metrics: crate::pane::ScrollMetrics,
-    track: Rect,
-    row: u16,
-) -> usize {
-    let thumb = match scrollbar_thumb(metrics, track) {
-        Some(thumb) => thumb,
-        None => return 0,
-    };
-    let clamped_row = row.clamp(track.y, track.y + track.height.saturating_sub(1));
-    let row_offset = clamped_row.saturating_sub(track.y) as usize;
-    let thumb_center = (thumb.len as usize) / 2;
-    let desired_top = row_offset.saturating_sub(thumb_center);
-    scrollbar_offset_from_thumb_top(metrics, track, desired_top)
-}
-
-pub(crate) fn scrollbar_offset_from_drag_row(
-    metrics: crate::pane::ScrollMetrics,
-    track: Rect,
-    row: u16,
-    grab_row_offset: u16,
-) -> usize {
-    let clamped_row = row.clamp(track.y, track.y + track.height.saturating_sub(1));
-    let row_offset = clamped_row.saturating_sub(track.y) as usize;
-    let desired_top = row_offset.saturating_sub(grab_row_offset as usize);
-    scrollbar_offset_from_thumb_top(metrics, track, desired_top)
-}
-
 pub(super) fn render_scrollbar(
     frame: &mut Frame,
     metrics: crate::pane::ScrollMetrics,

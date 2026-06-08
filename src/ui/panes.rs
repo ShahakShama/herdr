@@ -161,7 +161,7 @@ pub(super) fn compute_pane_infos(
     };
 
     let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
+    let terminal_active = app.main_focused();
 
     if ws.zoomed {
         let focused_id = ws.layout.focused();
@@ -250,7 +250,7 @@ pub(super) fn render_panes(
     };
 
     let multi_pane = ws.layout.pane_count() > 1;
-    let terminal_active = app.mode == Mode::Terminal;
+    let terminal_active = app.main_focused();
 
     for info in &app.view.pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
@@ -289,6 +289,8 @@ pub(super) fn render_panes(
                 frame.render_widget(block, info.rect);
             }
 
+            // The focused pane is a live terminal whenever Main has focus (keys
+            // are forwarded to it), so show its cursor there.
             let show_cursor = info.is_focused && terminal_active && !pane_is_scrolled_back(rt);
             rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);

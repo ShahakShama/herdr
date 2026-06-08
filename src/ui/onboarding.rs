@@ -12,8 +12,6 @@ use super::widgets::{
 };
 use crate::app::AppState;
 
-const ONBOARDING_PREFIX_LABEL: &str = "ctrl+b";
-
 pub(super) fn render_onboarding_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     super::dim_background(frame, area);
     render_onboarding_welcome(app, frame, area);
@@ -63,7 +61,7 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(
         Paragraph::new(
-            "  this is a mouse-first terminal.\n  click the sidebar to switch workspaces, drag pane\n  borders to resize, right-click for context menus.",
+            "  this is a keyboard-first agent control surface.\n  alt+h/j/k/l move focus, arrows select, enter activates;\n  alt+n new agent, alt+r review, alt+x kill, alt+? help.",
         )
         .style(Style::default().fg(app.palette.overlay1)),
         content_rows[0],
@@ -72,23 +70,23 @@ fn render_onboarding_welcome(app: &AppState, frame: &mut Frame, area: Rect) {
     let key_line = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(
-            ONBOARDING_PREFIX_LABEL,
+            "alt+?",
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " enters prefix mode · ",
+            " shows keybinds · ",
             Style::default().fg(app.palette.overlay1),
         ),
         Span::styled(
-            "?",
+            "alt+,",
             Style::default()
                 .fg(app.palette.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            " shows keybinds and settings",
+            " opens settings",
             Style::default().fg(app.palette.overlay1),
         ),
     ]);

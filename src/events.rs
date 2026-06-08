@@ -22,6 +22,16 @@ pub struct WorktreeRemoveResult {
     pub result: Result<(), String>,
 }
 
+/// Direction a pane asked herdr to move focus, signalled by the program inside
+/// it (e.g. vim emitting our focus OSC when it has no window left to move to).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneFocusDirection {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -96,6 +106,13 @@ pub enum AppEvent {
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
+    /// The program in a pane (vim, via our focus OSC) asked herdr to move pane
+    /// focus in the given direction because it had no window of its own to move
+    /// to. The main loop only acts on this when the pane is the focused Main.
+    PaneFocusSignal {
+        pane_id: PaneId,
+        direction: PaneFocusDirection,
+    },
     /// Background git status refresh completed for workspaces.
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
