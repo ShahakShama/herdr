@@ -96,9 +96,15 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
             .flatten()
         });
 
+    let prs_shown = review.source == crate::app::state::PickerSource::ReviewRequests;
+    let title = if prs_shown {
+        format!(" review: {} · awaiting my review", review.repo.label)
+    } else {
+        format!(" review: {}", review.repo.label)
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!(" review: {}", review.repo.label),
+            title,
             Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
         ))),
         Rect::new(area.x, area.y, area.width, 1),
@@ -116,7 +122,9 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
     let footer_y = area.y + area.height.saturating_sub(1);
     let list_rows = body.height.saturating_sub(1) as usize;
 
-    if review.branches.is_empty() {
+    if prs_shown {
+        render_review_pr_rows(app, frame, body, review, main_pane_branch.as_deref(), list_rows);
+    } else if review.branches.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " no branches",
@@ -207,13 +215,84 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
+    let footer = if prs_shown {
+        " space open · c checkout · o branches · esc back"
+    } else {
+        " space open · c checkout · alt+p pr · o prs · esc back"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " space open · c checkout · alt+p pr · esc back",
+            footer,
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
         ))),
         Rect::new(area.x, footer_y, area.width, 1),
     );
+}
+
+/// The review picker's PR list: one row per open PR awaiting the user's
+/// review, `#number title · author`. The PR whose head branch is checked out
+/// in the Main pane gets the same filled accent node as the branch list.
+fn render_review_pr_rows(
+    app: &AppState,
+    frame: &mut Frame,
+    body: Rect,
+    review: &crate::app::state::ReviewState,
+    main_pane_branch: Option<&str>,
+    list_rows: usize,
+) {
+    let p = &app.palette;
+    let prs = review.prs.as_deref().unwrap_or_default();
+    if prs.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " no PRs awaiting review",
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ))),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        return;
+    }
+
+    let scroll = review.scroll.min(review.selected);
+    for (row, (idx, pr)) in prs.iter().enumerate().skip(scroll).enumerate() {
+        if row >= list_rows {
+            break;
+        }
+        let y = body.y + row as u16;
+        let selected = idx == review.selected;
+        let is_main_pane = main_pane_branch == Some(pr.head_branch.as_str());
+        let label_style = if selected {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
+        let (marker, marker_color) = if is_main_pane {
+            ("◉ ", p.accent)
+        } else {
+            ("  ", p.green)
+        };
+        let number = format!("#{} ", pr.number);
+        let author = format!(" · {}", pr.author);
+        let title_avail = (body.width as usize)
+            .saturating_sub(2 + number.chars().count() + author.chars().count());
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(marker, Style::default().fg(marker_color)),
+                Span::styled(number, Style::default().fg(p.accent)),
+                Span::styled(truncate(&pr.title, title_avail), label_style),
+                Span::styled(
+                    author,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ]))
+            .style(if selected {
+                Style::default().bg(p.surface0)
+            } else {
+                Style::default()
+            }),
+            Rect::new(body.x, y, body.width, 1),
+        );
+    }
 }
 
 /// Bottom half: every running agent with title, status, repo, and summary;

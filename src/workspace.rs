@@ -24,8 +24,8 @@ use self::git::git_ahead_behind;
 pub use self::{
     git::{
         default_scan_root, derive_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, list_review_branches, review_base, scan_repositories, Branch,
-        GitSpaceMetadata, GitStatusCacheEntry, Repository,
+        git_status_cache_key, list_prs_for_my_review, list_review_branches, review_base,
+        scan_repositories, Branch, GitSpaceMetadata, GitStatusCacheEntry, Repository, ReviewPr,
     },
     tab::Tab,
 };
@@ -98,6 +98,10 @@ pub struct Workspace {
     pub(crate) cached_git_space: Option<GitSpaceMetadata>,
     /// Explicit Herdr-managed worktree grouping provenance.
     pub worktree_space: Option<WorktreeSpaceMembership>,
+    /// The PR opened for review in this workspace (from the branch picker's
+    /// review-requests list). Only honoured while the checked-out branch still
+    /// matches the PR head; see [`Self::reviewing_pr_active`].
+    pub reviewing_pr: Option<ReviewPr>,
     /// Stable-ish public pane numbers within this workspace.
     /// New panes append at the end; closing a pane compacts higher numbers down.
     pub public_pane_numbers: HashMap<PaneId, usize>,
@@ -232,6 +236,7 @@ impl Workspace {
                 cached_git_ahead_behind: None,
                 cached_git_space: None,
                 worktree_space: None,
+                reviewing_pr: None,
                 public_pane_numbers,
                 next_public_pane_number: 2,
                 tabs: vec![tab],
@@ -668,6 +673,14 @@ impl Workspace {
         self.cached_git_branch.clone()
     }
 
+    /// The PR under review in this workspace, while the checked-out branch
+    /// still matches the PR's head. Switching to another branch makes the
+    /// stored PR dormant (and active again if the head is checked back out).
+    pub fn reviewing_pr_active(&self) -> Option<&ReviewPr> {
+        let pr = self.reviewing_pr.as_ref()?;
+        (self.cached_git_branch.as_deref() == Some(pr.head_branch.as_str())).then_some(pr)
+    }
+
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
     }
@@ -845,6 +858,7 @@ impl Workspace {
             cached_git_ahead_behind: None,
             cached_git_space: None,
             worktree_space: None,
+            reviewing_pr: None,
             public_pane_numbers,
             next_public_pane_number: 2,
             tabs: vec![tab],

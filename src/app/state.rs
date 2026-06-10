@@ -811,6 +811,17 @@ pub enum LeftHalf {
     Agents,
 }
 
+/// Which list the branch picker shows; `o` toggles between them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PickerSource {
+    /// The repository's own branches (the default).
+    #[default]
+    Branches,
+    /// Open PRs awaiting the user's review (`gh pr list --search
+    /// "review-requested:@me"`).
+    ReviewRequests,
+}
+
 /// Branch-picker state while reviewing a repository.
 #[derive(Debug, Clone)]
 pub struct ReviewState {
@@ -818,10 +829,45 @@ pub struct ReviewState {
     pub repo: crate::workspace::Repository,
     /// Branches offered for review.
     pub branches: Vec<crate::workspace::Branch>,
-    /// Selected branch index.
+    /// Selected row index (into whichever list [`Self::source`] shows).
     pub selected: usize,
-    /// Scroll offset for the branch list.
+    /// Scroll offset for the list.
     pub scroll: usize,
+    /// Which list is shown.
+    pub source: PickerSource,
+    /// PRs awaiting the user's review; fetched lazily on the first toggle to
+    /// [`PickerSource::ReviewRequests`] and cached for the picker's lifetime.
+    pub prs: Option<Vec<crate::workspace::ReviewPr>>,
+}
+
+impl ReviewState {
+    /// Open a picker on `repo`'s branch list.
+    pub fn new(repo: crate::workspace::Repository, branches: Vec<crate::workspace::Branch>) -> Self {
+        Self {
+            repo,
+            branches,
+            selected: 0,
+            scroll: 0,
+            source: PickerSource::default(),
+            prs: None,
+        }
+    }
+
+    /// Number of rows in the currently-shown list.
+    pub fn visible_len(&self) -> usize {
+        match self.source {
+            PickerSource::Branches => self.branches.len(),
+            PickerSource::ReviewRequests => self.prs.as_ref().map_or(0, Vec::len),
+        }
+    }
+
+    /// The PR selected in the review-requests list, when that list is shown.
+    pub fn selected_pr(&self) -> Option<&crate::workspace::ReviewPr> {
+        match self.source {
+            PickerSource::Branches => None,
+            PickerSource::ReviewRequests => self.prs.as_ref()?.get(self.selected),
+        }
+    }
 }
 
 /// A row in the create-agent form. Rows are navigated with up/down and the

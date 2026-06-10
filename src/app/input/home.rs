@@ -492,20 +492,15 @@ impl AppState {
     fn open_create_agent_branch_picker(&mut self) {
         if let Some(repo) = self.control.selected_repository().cloned() {
             let branches = crate::workspace::list_review_branches(&repo.root);
-            self.control.review = Some(ReviewState {
-                repo,
-                branches,
-                selected: 0,
-                scroll: 0,
-            });
+            self.control.review = Some(ReviewState::new(repo, branches));
             self.mode = Mode::Review;
         }
     }
 
-    /// Move the branch selection in the review picker.
+    /// Move the row selection in the review picker (whichever list is shown).
     pub(crate) fn review_move_selection(&mut self, delta: isize) {
         if let Some(review) = self.control.review.as_mut() {
-            review.selected = step_index(review.selected, delta, review.branches.len());
+            review.selected = step_index(review.selected, delta, review.visible_len());
         }
     }
 
@@ -881,6 +876,8 @@ mod tests {
             ],
             selected: 0,
             scroll: 0,
+            source: Default::default(),
+            prs: None,
         });
 
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
@@ -900,6 +897,39 @@ mod tests {
         assert_eq!(app.state.control.review.as_ref().unwrap().selected, 1);
 
         // The picker stays open (still in review mode).
+        assert_eq!(app.state.mode, Mode::Review);
+    }
+
+    #[test]
+    fn review_picker_o_toggles_between_branches_and_cached_prs() {
+        use crate::app::state::PickerSource;
+        let mut app = app_with_picker(1);
+        // Pre-populate the PR cache so the toggle doesn't shell out to `gh`.
+        app.state.control.review.as_mut().unwrap().prs = Some(vec![crate::workspace::ReviewPr {
+            number: 7,
+            title: "Add feature".into(),
+            author: "bob".into(),
+            head_branch: "bob/feature".into(),
+            base_branch: "main".into(),
+            url: "https://github.com/acme/proj/pull/7".into(),
+        }]);
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+
+        // `o` switches to the PR list and resets the selection.
+        app.handle_review_key(key('o'));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert_eq!(review.source, PickerSource::ReviewRequests);
+        assert_eq!(review.selected, 0);
+        assert_eq!(review.visible_len(), 1);
+
+        // Navigation is clamped to the PR list's length, not the branch list's.
+        app.handle_review_key(key('j'));
+        assert_eq!(app.state.control.review.as_ref().unwrap().selected, 0);
+
+        // `o` again returns to the branch list; the picker stays open.
+        app.handle_review_key(key('o'));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert_eq!(review.source, PickerSource::Branches);
         assert_eq!(app.state.mode, Mode::Review);
     }
 
@@ -928,6 +958,8 @@ mod tests {
             ],
             selected,
             scroll: 0,
+            source: Default::default(),
+            prs: None,
         });
         app
     }

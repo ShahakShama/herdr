@@ -846,6 +846,13 @@ impl App {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+        // Which list the picker is showing; several commands dispatch on it.
+        let prs_shown = self
+            .state
+            .control
+            .review
+            .as_ref()
+            .is_some_and(|review| review.source == crate::app::state::PickerSource::ReviewRequests);
         match key.code {
             KeyCode::Esc => {
                 self.state.mode = Mode::Home;
@@ -858,18 +865,66 @@ impl App {
             KeyCode::Char('k') if plain => self.state.review_move_selection(-1),
             KeyCode::Char('j') if plain => self.state.review_move_selection(1),
             KeyCode::Char('h') | KeyCode::Char('l') if plain => {}
-            // The picker is not a text input, so plain `p` (or alt+p) submits a PR.
-            KeyCode::Char('p') => self.submit_pr_for_review(),
-            // Plain `c` checks the selected branch out into the Main pane's
-            // worktree, when Main is a worktree of the repo being browsed.
-            KeyCode::Char('c') if plain => self.checkout_selected_branch_into_main(),
-            // Enter (or Space) picks the base branch and moves to the name form;
-            // the alt modifier additionally pre-checks "create a new branch".
+            // Plain `o` toggles between the repo's branches and the open PRs
+            // awaiting the user's review.
+            KeyCode::Char('o') if plain => self.toggle_review_picker_source(),
+            // The picker is not a text input, so plain `p` (or alt+p) submits a
+            // PR. Only meaningful on the branch list — the PR list IS PRs.
+            KeyCode::Char('p') if !prs_shown => self.submit_pr_for_review(),
+            // Plain `c` checks the selected branch (or PR head) out into the
+            // Main pane's worktree, when Main is a worktree of the repo browsed.
+            KeyCode::Char('c') if plain => {
+                if prs_shown {
+                    self.checkout_selected_pr_into_main(false);
+                } else {
+                    self.checkout_selected_branch_into_main();
+                }
+            }
+            // Enter (or Space): on the branch list, pick the base branch and
+            // move to the name form (alt pre-checks "create a new branch"); on
+            // the PR list, open the PR for review in the Main pane.
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let new_branch = key.modifiers.contains(KeyModifiers::ALT);
-                self.pick_branch_for_create(new_branch);
+                if prs_shown {
+                    self.checkout_selected_pr_into_main(true);
+                } else {
+                    let new_branch = key.modifiers.contains(KeyModifiers::ALT);
+                    self.pick_branch_for_create(new_branch);
+                }
             }
             _ => {}
+        }
+    }
+
+    /// `o` in the branch picker: toggle between the repo's branch list and the
+    /// open PRs awaiting the user's review. The PR list is fetched (via `gh`)
+    /// on the first toggle and cached for the picker's lifetime; a fetch
+    /// failure leaves the branch list shown and explains via a toast.
+    fn toggle_review_picker_source(&mut self) {
+        use crate::app::state::PickerSource;
+        let Some(review) = self.state.control.review.as_ref() else {
+            return;
+        };
+        if review.source == PickerSource::Branches && review.prs.is_none() {
+            let repo_root = review.repo.root.clone();
+            match crate::workspace::list_prs_for_my_review(&repo_root) {
+                Ok(prs) => {
+                    if let Some(review) = self.state.control.review.as_mut() {
+                        review.prs = Some(prs);
+                    }
+                }
+                Err(err) => {
+                    self.state.set_home_toast("PR list failed", err);
+                    return;
+                }
+            }
+        }
+        if let Some(review) = self.state.control.review.as_mut() {
+            review.source = match review.source {
+                PickerSource::Branches => PickerSource::ReviewRequests,
+                PickerSource::ReviewRequests => PickerSource::Branches,
+            };
+            review.selected = 0;
+            review.scroll = 0;
         }
     }
 
@@ -1034,6 +1089,110 @@ impl App {
         // (the selection is unchanged, so it lands on the same branch).
         self.state.mode = Mode::Review;
         self.checkout_selected_branch_into_main();
+    }
+
+    /// Check the PR selected in the review-requests list out into the Main
+    /// pane's worktree (via `gh pr checkout`, which also handles fork PRs) and
+    /// tag the workspace with the PR so the review row diffs against the PR
+    /// base and `alt+g` switches to drafting review replies.
+    ///
+    /// With `open_review`, additionally opens the review row (when not already
+    /// open) and leaves the picker for the Main pane — the "space opens the PR"
+    /// path. Without it (`c`), the picker stays open like the branch checkout.
+    fn checkout_selected_pr_into_main(&mut self, open_review: bool) {
+        let Some(pr) = self
+            .state
+            .control
+            .review
+            .as_ref()
+            .and_then(|review| review.selected_pr())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(picker_repo_root) = self
+            .state
+            .control
+            .review
+            .as_ref()
+            .map(|review| review.repo.root.clone())
+        else {
+            return;
+        };
+
+        let Some(ws_idx) = self.state.active else {
+            self.state
+                .set_home_toast("checkout skipped", "no active workspace in the Main pane");
+            return;
+        };
+        let Some(space) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.worktree_space().cloned())
+        else {
+            self.state
+                .set_home_toast("checkout skipped", "the Main pane is not a repo worktree");
+            return;
+        };
+        if crate::worktree::canonical_or_original(&space.repo_root)
+            != crate::worktree::canonical_or_original(&picker_repo_root)
+        {
+            self.state.set_home_toast(
+                "checkout skipped",
+                "the Main pane is a different repo than the one selected",
+            );
+            return;
+        }
+
+        let output = std::process::Command::new("gh")
+            .current_dir(&space.checkout_path)
+            .args(["pr", "checkout", &pr.number.to_string()])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                tracing::warn!(error = %message, "gh pr checkout failed");
+                self.state.set_home_toast("checkout failed", message);
+                return;
+            }
+            Err(err) => {
+                self.state
+                    .set_home_toast("checkout failed", format!("gh not available: {err}"));
+                return;
+            }
+        }
+
+        // Reflect the new branch and the PR-under-review immediately; the
+        // periodic git poll keeps `cached_git_branch` accurate after.
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            ws.cached_git_branch = Some(pr.head_branch.clone());
+            ws.reviewing_pr = Some(pr.clone());
+        }
+        self.respawn_review_row_after_checkout(ws_idx);
+        self.state.mark_session_dirty();
+        self.state
+            .set_home_toast("reviewing", format!("PR #{} · {}", pr.number, pr.head_branch));
+
+        if open_review {
+            let review_open = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.pane_with_role(crate::pane::PaneRole::Review))
+                .is_some();
+            if !review_open {
+                self.toggle_review_row();
+            }
+            self.state.mode = Mode::Home;
+            self.state.control.review = None;
+            self.state.control.focus = crate::app::state::FocusPane::Main;
+        } else if let Some(review) = self.state.control.review.as_mut() {
+            // Keep the picker's branch list (shown when toggling back) in sync
+            // with the checkout just performed.
+            review.branches = crate::workspace::list_review_branches(&review.repo.root);
+        }
     }
 
     /// If the active workspace's REVIEW row is open, replace it with a freshly
@@ -1321,9 +1480,14 @@ impl App {
         focused.is_some() && focused == ws.pane_with_role(crate::pane::PaneRole::Review)
     }
 
-    /// alt+g: ask the active workspace's agent to fix every `CLAUDE:` comment in
-    /// the branch diff. Writes a prompt into the agent (root) pane and submits
-    /// it with Enter.
+    /// alt+g: hand the review-row context to the active workspace's agent.
+    /// Writes a prompt into the agent (root) pane and submits it with Enter.
+    ///
+    /// On the user's own branch, the prompt asks the agent to fix every
+    /// `CLAUDE:` comment in the branch diff. While the workspace is reviewing
+    /// someone else's PR (see [`crate::workspace::Workspace::reviewing_pr_active`]),
+    /// it instead asks the agent to turn those `CLAUDE:` notes into PR review
+    /// comments — drafted together with the user, then submitted via `gh`.
     ///
     /// Refuses (with a toast) when the agent already has a prompt typed in, since
     /// our text would otherwise be concatenated onto it and the merged line
@@ -1349,7 +1513,12 @@ impl App {
             self.state.set_home_toast("fix failed", "no agent pane");
             return;
         };
-        let base = crate::workspace::review_base(&repo_root, &branch);
+        let reviewing = ws.reviewing_pr_active().cloned();
+        // Match the review row's diff base (see `row_spawn_spec`).
+        let base = match &reviewing {
+            Some(pr) => format!("origin/{}", pr.base_branch),
+            None => crate::workspace::review_base(&repo_root, &branch),
+        };
 
         // Guard: don't clobber a half-typed prompt.
         if self.agent_prompt_busy(ws_idx, agent_pane) {
@@ -1360,7 +1529,10 @@ impl App {
             return;
         }
 
-        let prompt = claude_fix_prompt(&base);
+        let prompt = match &reviewing {
+            Some(pr) => claude_reply_prompt(&base, pr),
+            None => claude_fix_prompt(&base),
+        };
         let send_result: Result<(), String> = match self.lookup_runtime_sender(ws_idx, agent_pane)
         {
             None => Err("agent not running".to_string()),
@@ -1386,9 +1558,15 @@ impl App {
             }
         };
         match send_result {
-            Ok(()) => self
-                .state
-                .set_home_toast("fix sent", "asked agent to fix CLAUDE: comments"),
+            Ok(()) => match &reviewing {
+                Some(pr) => self.state.set_home_toast(
+                    "replies sent",
+                    format!("asked agent to draft replies for PR #{}", pr.number),
+                ),
+                None => self
+                    .state
+                    .set_home_toast("fix sent", "asked agent to fix CLAUDE: comments"),
+            },
             Err(err) => self.state.set_home_toast("fix failed", err),
         }
     }
@@ -1449,7 +1627,13 @@ impl App {
                         .set_home_toast("review failed", "agent has no branch");
                     return None;
                 };
-                let base = crate::workspace::review_base(&repo_root, &agent_branch);
+                // While reviewing someone else's PR, diff against the PR's base
+                // as GitHub does (`origin/<base>`); otherwise resolve the usual
+                // graphite-parent/default-branch base.
+                let base = match ws.reviewing_pr_active() {
+                    Some(pr) => format!("origin/{}", pr.base_branch),
+                    None => crate::workspace::review_base(&repo_root, &agent_branch),
+                };
                 let review_cmd = std::env::var("HERDR_REVIEW_CMD")
                     .unwrap_or_else(|_| "vimrev".to_string());
                 let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
@@ -1526,6 +1710,34 @@ comment. After applying each fix, remove the `CLAUDE:` comment."
     )
 }
 
+/// The prompt sent by `alt+g` while the workspace is reviewing someone else's
+/// PR: instead of fixing the code, turn the user's `CLAUDE:` review notes into
+/// PR review comments — drafted together with the user, then submitted via
+/// `gh` — and clean the notes out of the worktree afterwards.
+fn claude_reply_prompt(base: &str, pr: &crate::workspace::ReviewPr) -> String {
+    format!(
+        "I'm reviewing PR #{number} ({url}) by {author}. This branch is theirs — do NOT \
+change their code. My review notes are comments starting with `CLAUDE:` that I added to \
+the diff against the PR base (`git diff {base}...HEAD`).\n\
+1. Collect every `CLAUDE:` note, with its file and line in the PR's diff.\n\
+2. Fetch the PR's existing review threads: \
+`gh api repos/{{owner}}/{{repo}}/pulls/{number}/comments` (resolve {{owner}}/{{repo}} from \
+`gh repo view --json owner,name`).\n\
+3. For each note, draft a review comment — or a reply when it belongs on an existing \
+thread — and show me all drafts. Iterate on them with me; do NOT submit anything until I \
+explicitly approve.\n\
+4. Once I approve, submit the inline comments as a single review: \
+`gh api -X POST repos/{{owner}}/{{repo}}/pulls/{number}/reviews` with `\"event\": \"COMMENT\"` \
+and a `comments` array of `{{path, line, side, body}}` entries; post thread replies via \
+`gh api -X POST repos/{{owner}}/{{repo}}/pulls/{number}/comments/<comment_id>/replies`.\n\
+5. After submitting, remove my `CLAUDE:` notes from the worktree (e.g. `git restore` the \
+touched files or delete just those comment lines) so the checkout is clean.",
+        number = pr.number,
+        url = pr.url,
+        author = pr.author,
+    )
+}
+
 /// Best-effort heuristic: does the cursor's row (`row`) already contain
 /// user-typed text to the LEFT of the cursor (`cursor_col`)?
 ///
@@ -1546,7 +1758,7 @@ fn prompt_has_typed_text(row: &str, cursor_col: u16) -> bool {
 
 #[cfg(test)]
 mod claude_fix_tests {
-    use super::{claude_fix_prompt, prompt_has_typed_text};
+    use super::{claude_fix_prompt, claude_reply_prompt, prompt_has_typed_text};
 
     #[test]
     fn prompt_embeds_base_and_instructions() {
@@ -1554,6 +1766,30 @@ mod claude_fix_tests {
         assert!(p.contains("git diff origin/master...HEAD"));
         assert!(p.contains("CLAUDE:"));
         assert!(p.contains("remove"));
+    }
+
+    #[test]
+    fn reply_prompt_embeds_pr_and_collaboration_contract() {
+        let pr = crate::workspace::ReviewPr {
+            number: 412,
+            title: "Fix parser".to_string(),
+            author: "alice".to_string(),
+            head_branch: "alice/fix-parser".to_string(),
+            base_branch: "master".to_string(),
+            url: "https://github.com/acme/proj/pull/412".to_string(),
+        };
+        let p = claude_reply_prompt("origin/master", &pr);
+        // Targets the PR, diffs the same base as the review row.
+        assert!(p.contains("PR #412"));
+        assert!(p.contains("https://github.com/acme/proj/pull/412"));
+        assert!(p.contains("git diff origin/master...HEAD"));
+        // It's someone else's branch: no code changes, drafts need approval.
+        assert!(p.contains("do NOT"));
+        assert!(p.contains("approve"));
+        // Submission goes through gh, against the PR's review endpoints.
+        assert!(p.contains("gh api"));
+        assert!(p.contains("pulls/412/reviews"));
+        assert!(p.contains("CLAUDE:"));
     }
 
     #[test]

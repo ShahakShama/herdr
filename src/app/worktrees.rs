@@ -606,6 +606,8 @@ mod tests {
                 .collect(),
             selected: 0,
             scroll: 0,
+            source: Default::default(),
+            prs: None,
         });
         app
     }
