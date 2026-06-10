@@ -897,21 +897,27 @@ impl App {
     }
 
     /// `o` in the branch picker: toggle between the repo's branch list and the
-    /// open PRs awaiting the user's review. The PR list is fetched (via `gh`)
-    /// on the first toggle and cached for the picker's lifetime; a fetch
-    /// failure leaves the branch list shown and explains via a toast.
+    /// open PRs awaiting the user's review. The PR list is re-fetched (via
+    /// `gh`) on every toggle to it — review requests come and go while the
+    /// picker is open, so a one-shot cache goes stale. If the fetch fails, the
+    /// previous list (when there is one) is shown with a toast; with nothing
+    /// to fall back on, the branch list stays shown and the toast explains.
     fn toggle_review_picker_source(&mut self) {
         use crate::app::state::PickerSource;
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
-        if review.source == PickerSource::Branches && review.prs.is_none() {
+        if review.source == PickerSource::Branches {
             let repo_root = review.repo.root.clone();
+            let had_prs = review.prs.is_some();
             match crate::workspace::list_prs_for_my_review(&repo_root) {
                 Ok(prs) => {
                     if let Some(review) = self.state.control.review.as_mut() {
                         review.prs = Some(prs);
                     }
+                }
+                Err(err) if had_prs => {
+                    self.state.set_home_toast("PR list refresh failed", err);
                 }
                 Err(err) => {
                     self.state.set_home_toast("PR list failed", err);

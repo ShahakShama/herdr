@@ -835,8 +835,9 @@ pub struct ReviewState {
     pub scroll: usize,
     /// Which list is shown.
     pub source: PickerSource,
-    /// PRs awaiting the user's review; fetched lazily on the first toggle to
-    /// [`PickerSource::ReviewRequests`] and cached for the picker's lifetime.
+    /// PRs awaiting the user's review; re-fetched on every toggle to
+    /// [`PickerSource::ReviewRequests`], kept as a fallback when a refresh
+    /// fails.
     pub prs: Option<Vec<crate::workspace::ReviewPr>>,
 }
 

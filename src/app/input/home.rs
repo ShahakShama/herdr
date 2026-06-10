@@ -904,7 +904,10 @@ mod tests {
     fn review_picker_o_toggles_between_branches_and_cached_prs() {
         use crate::app::state::PickerSource;
         let mut app = app_with_picker(1);
-        // Pre-populate the PR cache so the toggle doesn't shell out to `gh`.
+        // The toggle re-fetches via `gh` each time; with the picker's repo root
+        // pointing at the nonexistent `/a` the fetch fails fast, and the picker
+        // falls back to the previous list — which is what lets this test run
+        // without `gh`, and what keeps the picker usable offline.
         app.state.control.review.as_mut().unwrap().prs = Some(vec![crate::workspace::ReviewPr {
             number: 7,
             title: "Add feature".into(),
