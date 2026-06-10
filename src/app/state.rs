@@ -721,6 +721,10 @@ pub enum Mode {
     /// Confirm creating a new branch when the chosen base is checked out
     /// elsewhere (the create-agent flow's "already checked out" fallback).
     ConfirmCreateBranch,
+    /// Confirm detaching another worktree so the branch picker's `c` can check
+    /// the selected branch out into the Main pane (the picker's "already checked
+    /// out elsewhere" fallback).
+    ConfirmCheckoutDetach,
     /// Rename the selected agent (and move its worktree directory to match).
     RenameAgent,
     /// Review: branch picker for the selected repo (control half → review half).
@@ -750,6 +754,7 @@ impl Mode {
                 | Mode::ConfirmKill
                 | Mode::ConfirmQuit
                 | Mode::ConfirmCreateBranch
+                | Mode::ConfirmCheckoutDetach
                 | Mode::RenameAgent
                 | Mode::Review
         )
@@ -882,6 +887,20 @@ pub struct ControlState {
     /// hit an "already checked out elsewhere" conflict. Lets the conflict prompt
     /// offer to detach that worktree.
     pub create_conflict_worktree: Option<std::path::PathBuf>,
+    /// The branch + worktree the picker's `c` action must free before it can
+    /// check the branch into the Main pane, set while in
+    /// [`Mode::ConfirmCheckoutDetach`].
+    pub checkout_conflict: Option<CheckoutConflict>,
+}
+
+/// A branch the picker wants to check into the Main pane that is currently held
+/// by another worktree. Drives the [`Mode::ConfirmCheckoutDetach`] prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutConflict {
+    /// Local branch name to claim.
+    pub branch: String,
+    /// Path of the other worktree currently holding `branch`.
+    pub worktree: std::path::PathBuf,
 }
 
 impl ControlState {

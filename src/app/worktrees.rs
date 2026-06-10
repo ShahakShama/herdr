@@ -570,6 +570,155 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Build an App whose Main pane (workspace 0) is the linked worktree `wt` of
+    /// `repo`, with the branch picker open on `repo` listing exactly `branches`.
+    fn app_with_picker_on_worktree(
+        repo: &std::path::Path,
+        wt: &std::path::Path,
+        branches: &[&str],
+    ) -> App {
+        let mut app = app_for_worktree_tests();
+        let mut ws = crate::workspace::Workspace::test_new("main");
+        ws.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "k".into(),
+            label: "repo".into(),
+            repo_root: repo.to_path_buf(),
+            checkout_path: wt.to_path_buf(),
+            is_linked_worktree: true,
+        });
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.mode = Mode::Review;
+        app.state.control.review = Some(crate::app::state::ReviewState {
+            repo: crate::workspace::Repository {
+                key: "k".into(),
+                root: repo.to_path_buf(),
+                label: "repo".into(),
+            },
+            branches: branches
+                .iter()
+                .map(|name| crate::workspace::Branch {
+                    name: (*name).into(),
+                    is_current: false,
+                    is_remote: false,
+                    graph_prefix: String::new(),
+                })
+                .collect(),
+            selected: 0,
+            scroll: 0,
+        });
+        app
+    }
+
+    fn worktree_head_branch(wt: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(wt)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn press(app: &mut App, c: char) {
+        app.handle_review_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+    }
+
+    #[test]
+    fn picker_c_checks_a_free_branch_into_the_main_worktree() {
+        let repo = create_committed_repo("picker-c-free-repo");
+        let wt = unique_temp_path("picker-c-free-wt");
+        run_git(
+            &repo,
+            &["worktree", "add", "--quiet", "-b", "wt/main", wt.to_str().unwrap(), "HEAD"],
+        );
+        run_git(&repo, &["branch", "feat"]);
+
+        let mut app = app_with_picker_on_worktree(&repo, &wt, &["feat"]);
+        press(&mut app, 'c');
+
+        // The worktree actually switched branches in place.
+        assert_eq!(worktree_head_branch(&wt), "feat");
+        // The picker stays open so you can keep checking branches out.
+        assert_eq!(app.state.mode, Mode::Review);
+    }
+
+    #[test]
+    fn picker_c_prompts_then_detaches_a_branch_held_by_another_worktree() {
+        let repo = create_committed_repo("picker-c-conflict-repo");
+        let wt = unique_temp_path("picker-c-conflict-wt");
+        run_git(
+            &repo,
+            &["worktree", "add", "--quiet", "-b", "wt/main", wt.to_str().unwrap(), "HEAD"],
+        );
+        // `feat` is checked out in a SECOND worktree — git refuses a second checkout.
+        run_git(&repo, &["branch", "feat"]);
+        let other = unique_temp_path("picker-c-conflict-other");
+        run_git(&repo, &["worktree", "add", "--quiet", other.to_str().unwrap(), "feat"]);
+
+        let mut app = app_with_picker_on_worktree(&repo, &wt, &["feat"]);
+
+        // `c` cannot check out directly; it opens the detach-confirm prompt naming
+        // the conflicting worktree instead of silently failing.
+        press(&mut app, 'c');
+        assert_eq!(app.state.mode, Mode::ConfirmCheckoutDetach);
+        let conflict = app
+            .state
+            .control
+            .checkout_conflict
+            .as_ref()
+            .expect("conflict recorded");
+        assert_eq!(conflict.branch, "feat");
+        assert_eq!(
+            crate::worktree::canonical_or_original(&conflict.worktree),
+            crate::worktree::canonical_or_original(&other)
+        );
+        // The Main worktree has NOT moved yet.
+        assert_eq!(worktree_head_branch(&wt), "wt/main");
+
+        // `d` detaches the other worktree and retries the checkout into Main.
+        app.handle_confirm_checkout_detach_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_eq!(worktree_head_branch(&wt), "feat");
+        // The other worktree was freed (detached HEAD, no branch).
+        assert_eq!(worktree_head_branch(&other), "HEAD");
+        // Back in the picker, conflict cleared.
+        assert_eq!(app.state.mode, Mode::Review);
+        assert!(app.state.control.checkout_conflict.is_none());
+    }
+
+    #[test]
+    fn picker_checkout_detach_cancel_leaves_everything_untouched() {
+        let repo = create_committed_repo("picker-c-cancel-repo");
+        let wt = unique_temp_path("picker-c-cancel-wt");
+        run_git(
+            &repo,
+            &["worktree", "add", "--quiet", "-b", "wt/main", wt.to_str().unwrap(), "HEAD"],
+        );
+        run_git(&repo, &["branch", "feat"]);
+        let other = unique_temp_path("picker-c-cancel-other");
+        run_git(&repo, &["worktree", "add", "--quiet", other.to_str().unwrap(), "feat"]);
+
+        let mut app = app_with_picker_on_worktree(&repo, &wt, &["feat"]);
+        press(&mut app, 'c');
+        assert_eq!(app.state.mode, Mode::ConfirmCheckoutDetach);
+
+        // `n` cancels: no worktree moves, picker reopens, conflict cleared.
+        app.handle_confirm_checkout_detach_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('n'),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_eq!(app.state.mode, Mode::Review);
+        assert!(app.state.control.checkout_conflict.is_none());
+        assert_eq!(worktree_head_branch(&wt), "wt/main");
+        assert_eq!(worktree_head_branch(&other), "feat");
+    }
+
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

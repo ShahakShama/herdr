@@ -236,6 +236,9 @@ pub fn render_with_runtime_registry(
         Mode::ConfirmCreateBranch => {
             control::render_confirm_create_branch_overlay(app, frame, frame.area())
         }
+        Mode::ConfirmCheckoutDetach => {
+            control::render_confirm_checkout_detach_overlay(app, frame, frame.area())
+        }
         Mode::Home | Mode::Review => {}
     }
 }

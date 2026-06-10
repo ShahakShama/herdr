@@ -950,11 +950,34 @@ impl App {
 
         let command =
             crate::worktree::build_checkout_branch_command(&space.checkout_path, &branch_name);
-        if let Err(err) = crate::worktree::run_worktree_command(&command) {
-            self.state.set_home_toast("checkout failed", err);
-            return;
+        match crate::worktree::run_worktree_command(&command) {
+            Ok(()) => self.apply_checkout_into_main(ws_idx, branch_name),
+            // The branch is live in another worktree (git refuses to check the
+            // same branch out twice). Offer to detach that worktree and retry,
+            // mirroring the create-agent flow's conflict prompt.
+            Err(err) if crate::worktree::is_branch_already_checked_out_error(&err) => {
+                match crate::worktree::worktree_path_for_branch(&picker_repo_root, &branch_name) {
+                    Some(worktree) => {
+                        self.state.control.checkout_conflict =
+                            Some(crate::app::state::CheckoutConflict {
+                                branch: branch_name,
+                                worktree,
+                            });
+                        self.state.mode = Mode::ConfirmCheckoutDetach;
+                    }
+                    // Couldn't locate the holding worktree; nothing to offer.
+                    None => self.state.set_home_toast("checkout failed", err),
+                }
+            }
+            Err(err) => self.state.set_home_toast("checkout failed", err),
         }
+    }
 
+    /// Apply a successful in-place checkout of `branch_name` into the Main pane's
+    /// worktree (workspace `ws_idx`): refresh the cached branch, respawn the
+    /// review row against the new base, and keep the picker open with an
+    /// up-to-date branch list so you can keep checking branches out.
+    fn apply_checkout_into_main(&mut self, ws_idx: usize, branch_name: String) {
         // Reflect the new branch immediately so the review row respawns against
         // it; the periodic git poll keeps `cached_git_branch` accurate after.
         if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
@@ -972,6 +995,45 @@ impl App {
                 review.selected = review.branches.len().saturating_sub(1);
             }
         }
+    }
+
+    /// Handle a key while confirming whether to detach the worktree holding the
+    /// branch the picker's `c` wants to claim. `d` detaches it and retries the
+    /// checkout into Main; `n`/Esc cancels back to the picker.
+    pub(super) fn handle_confirm_checkout_detach_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.detach_conflicting_worktree_and_checkout();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.state.control.checkout_conflict = None;
+                self.state.mode = Mode::Review;
+            }
+            _ => {}
+        }
+    }
+
+    /// Detach the worktree currently holding the conflicting branch (checking it
+    /// out at the same commit in detached HEAD), then retry the picker checkout
+    /// now that the branch is free. Keeps the prompt open on detach failure.
+    fn detach_conflicting_worktree_and_checkout(&mut self) {
+        let Some(conflict) = self.state.control.checkout_conflict.take() else {
+            self.state.mode = Mode::Review;
+            return;
+        };
+        let command = crate::worktree::build_worktree_detach_command(&conflict.worktree);
+        if let Err(err) = crate::worktree::run_worktree_command(&command) {
+            tracing::warn!(error = %err, "detach conflicting worktree (picker checkout) failed");
+            // Restore the conflict so the prompt stays actionable.
+            self.state.control.checkout_conflict = Some(conflict);
+            self.state.set_home_toast("detach failed", err);
+            return;
+        }
+        // The branch is free now; return to the picker and retry the checkout
+        // (the selection is unchanged, so it lands on the same branch).
+        self.state.mode = Mode::Review;
+        self.checkout_selected_branch_into_main();
     }
 
     /// If the active workspace's REVIEW row is open, replace it with a freshly

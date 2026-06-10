@@ -631,6 +631,59 @@ pub(super) fn render_confirm_create_branch_overlay(app: &AppState, frame: &mut F
     );
 }
 
+/// Confirmation modal for the branch picker's `c` action when the selected
+/// branch is checked out in another worktree: detach it to free the branch, or
+/// cancel back to the picker.
+pub(super) fn render_confirm_checkout_detach_overlay(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    super::dim_background(frame, area);
+    let p = &app.palette;
+    let Some(conflict) = app.control.checkout_conflict.as_ref() else {
+        return;
+    };
+    let other = conflict
+        .worktree
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| conflict.worktree.display().to_string());
+
+    let Some(inner) = super::widgets::render_modal_shell(frame, area, 60, 6, p) else {
+        return;
+    };
+    if inner.height < 2 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!(
+                "Branch “{}” is checked out in worktree “{other}”.",
+                conflict.branch
+            ),
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+        )))
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "d detach it & check out here · n cancel",
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        )))
+        .wrap(ratatui::widgets::Wrap { trim: true }),
+        rows[2],
+    );
+}
+
 /// Confirmation modal for quitting herdr.
 pub(super) fn render_confirm_quit_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     super::dim_background(frame, area);

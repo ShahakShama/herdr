@@ -1346,6 +1346,7 @@ impl App {
             Mode::ConfirmKill => self.state.handle_confirm_kill_key(key_event),
             Mode::ConfirmQuit => self.state.handle_confirm_quit_key(key_event),
             Mode::ConfirmCreateBranch => self.handle_confirm_create_branch_key(key_event),
+            Mode::ConfirmCheckoutDetach => self.handle_confirm_checkout_detach_key(key_event),
             Mode::Review if self.state.review_picker_owns_key(key_event) => {
                 self.handle_review_key(key_event)
             }
