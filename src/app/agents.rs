@@ -1628,9 +1628,9 @@ impl App {
     }
 
     /// While workspace `ws_idx` is reviewing someone else's PR, start a
-    /// background `git fetch origin <base>` so the review row's
-    /// `origin/<base>` diff target reflects the base as GitHub sees it (the
-    /// remote-tracking ref is only as fresh as the last fetch). Returns true
+    /// background `git fetch origin <base> <head>` so the review row's
+    /// `origin/<base>`..`origin/<head>` diff reflects the PR as GitHub sees it
+    /// (remote-tracking refs are only as fresh as the last fetch). Returns true
     /// when the caller must NOT spawn the review row yet —
     /// [`Self::handle_review_base_fetch_finished`] spawns it when the fetch
     /// lands. A loading box renders in the toast slot meanwhile.
@@ -1650,6 +1650,7 @@ impl App {
         }
         let workspace_id = ws.id.clone();
         let base_branch = pr.base_branch.clone();
+        let head_branch = pr.head_branch.clone();
         let repo_root = ws
             .worktree_space()
             .map(|space| space.repo_root.clone())
@@ -1660,12 +1661,12 @@ impl App {
                 pr_number: pr.number,
                 base_branch: base_branch.clone(),
             });
-        tracing::info!(pr = pr.number, base = %base_branch, "starting review-base fetch");
+        tracing::info!(pr = pr.number, base = %base_branch, head = %head_branch, "starting review-refs fetch");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let result = match std::process::Command::new("git")
                 .current_dir(&repo_root)
-                .args(["fetch", "origin", &base_branch])
+                .args(["fetch", "origin", &base_branch, &head_branch])
                 .output()
             {
                 Ok(out) if out.status.success() => Ok(()),
@@ -1706,10 +1707,13 @@ impl App {
             .take()
             .expect("checked above");
         if let Err(err) = result.result {
-            tracing::warn!(base = %fetch.base_branch, error = %err, "review-base fetch failed");
+            tracing::warn!(base = %fetch.base_branch, error = %err, "review-refs fetch failed");
             self.state.set_home_toast(
                 "fetch failed",
-                format!("origin/{} may be stale: {err}", fetch.base_branch),
+                format!(
+                    "origin/{} and the PR head may be stale: {err}",
+                    fetch.base_branch
+                ),
             );
         }
         let ws_idx = self
@@ -1895,16 +1899,24 @@ impl App {
                         .set_home_toast("review failed", "agent has no branch");
                     return None;
                 };
-                // While reviewing someone else's PR, diff against the PR's base
-                // as GitHub does (`origin/<base>`); otherwise resolve the usual
-                // graphite-parent/default-branch base.
-                let base = match ws.reviewing_pr_active() {
-                    Some(pr) => format!("origin/{}", pr.base_branch),
-                    None => crate::workspace::review_base(&repo_root, &agent_branch),
-                };
                 let review_cmd = std::env::var("HERDR_REVIEW_CMD")
                     .unwrap_or_else(|_| "vimrev".to_string());
-                let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
+                // While reviewing someone else's PR, diff the PR exactly as
+                // GitHub shows it — `origin/<head>` against `origin/<base>` —
+                // via the review command's two-ref form, so a stale local
+                // checkout can't skew the review. Otherwise diff the worktree
+                // against the usual graphite-parent/default-branch base.
+                let command_line = match ws.reviewing_pr_active() {
+                    Some(pr) => format!(
+                        "{review_cmd} {} {}",
+                        shell_single_quote(&format!("origin/{}", pr.base_branch)),
+                        shell_single_quote(&format!("origin/{}", pr.head_branch)),
+                    ),
+                    None => {
+                        let base = crate::workspace::review_base(&repo_root, &agent_branch);
+                        format!("{review_cmd} {}", shell_single_quote(&base))
+                    }
+                };
                 let shell = crate::pane::pane_shell(&default_shell);
                 Some((vec![shell, "-ic".to_string(), command_line], cwd))
             }
@@ -2155,6 +2167,27 @@ mod review_base_fetch_tests {
         assert!(app.state.workspaces[0]
             .pane_with_role(crate::pane::PaneRole::Review)
             .is_none());
+    }
+
+    #[test]
+    fn review_row_diffs_the_remote_pr_refs_while_reviewing() {
+        let mut app = app();
+        let mut ws = crate::workspace::Workspace::test_new("main");
+        ws.cached_git_branch = Some(pr().head_branch);
+        ws.reviewing_pr = Some(pr());
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+
+        let (argv, _cwd) = app
+            .row_spawn_spec(0, crate::pane::PaneRole::Review)
+            .expect("review row must spawn");
+        let command_line = argv.last().expect("argv has a command line");
+        // origin/<base> then origin/<head> — the review command's
+        // two-ref (parent, tip) form, independent of the local checkout.
+        assert!(
+            command_line.ends_with("'origin/master' 'origin/alice/fix-parser'"),
+            "unexpected review command: {command_line}"
+        );
     }
 
     #[test]
