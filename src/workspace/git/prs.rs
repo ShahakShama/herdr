@@ -49,39 +49,77 @@ pub fn list_prs_for_my_review(repo_root: &Path) -> Result<Vec<ReviewPr>, String>
     parse_pr_list(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Look a single PR up by number, via `gh pr view` — any PR in the repo,
+/// regardless of author or requested reviewers.
+///
+/// Errors carry a user-facing message (gh missing, no such PR, …).
+pub fn pr_by_number(repo_root: &Path, number: u64) -> Result<ReviewPr, String> {
+    let output = std::process::Command::new("gh")
+        .current_dir(repo_root)
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "number,title,author,headRefName,baseRefName,url",
+        ])
+        .output()
+        .map_err(|err| format!("gh not available: {err}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    parse_pr(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Raw shape of one PR in `gh`'s
+/// `--json number,title,author,headRefName,baseRefName,url` output, shared by
+/// the list (`gh pr list`) and single-PR (`gh pr view`) queries.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPr {
+    number: u64,
+    title: String,
+    author: RawAuthor,
+    head_ref_name: String,
+    base_ref_name: String,
+    url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawAuthor {
+    login: String,
+}
+
+impl From<RawPr> for ReviewPr {
+    fn from(pr: RawPr) -> Self {
+        ReviewPr {
+            number: pr.number,
+            title: pr.title,
+            author: pr.author.login,
+            head_branch: pr.head_ref_name,
+            base_branch: pr.base_ref_name,
+            url: pr.url,
+            graph_prefix: String::new(),
+        }
+    }
+}
+
 /// Parse `gh pr list --json number,title,author,headRefName,baseRefName,url`
 /// output into [`ReviewPr`]s.
 fn parse_pr_list(raw: &str) -> Result<Vec<ReviewPr>, String> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RawPr {
-        number: u64,
-        title: String,
-        author: RawAuthor,
-        head_ref_name: String,
-        base_ref_name: String,
-        url: String,
-    }
-    #[derive(serde::Deserialize)]
-    struct RawAuthor {
-        login: String,
-    }
-
     let prs: Vec<RawPr> =
         serde_json::from_str(raw).map_err(|err| format!("unexpected gh output: {err}"))?;
     Ok(partition_into_stacks(
-        prs.into_iter()
-            .map(|pr| ReviewPr {
-                number: pr.number,
-                title: pr.title,
-                author: pr.author.login,
-                head_branch: pr.head_ref_name,
-                base_branch: pr.base_ref_name,
-                url: pr.url,
-                graph_prefix: String::new(),
-            })
-            .collect(),
+        prs.into_iter().map(ReviewPr::from).collect(),
     ))
+}
+
+/// Parse `gh pr view --json number,title,author,headRefName,baseRefName,url`
+/// output (a single object) into a [`ReviewPr`].
+fn parse_pr(raw: &str) -> Result<ReviewPr, String> {
+    let pr: RawPr =
+        serde_json::from_str(raw).map_err(|err| format!("unexpected gh output: {err}"))?;
+    Ok(pr.into())
 }
 
 /// Group the PRs into their Graphite stacks and order each stack top-first.
@@ -285,6 +323,30 @@ mod tests {
         ]);
         assert_eq!(prs.len(), 2, "cycle members must not be dropped");
         assert!(prs.iter().all(|p| p.graph_prefix.is_empty()));
+    }
+
+    #[test]
+    fn parses_gh_pr_view_json() {
+        let raw = r#"{
+            "author": {"id": "u1", "is_bot": false, "login": "alice", "name": "Alice"},
+            "baseRefName": "master",
+            "headRefName": "alice/fix-parser",
+            "number": 412,
+            "title": "Fix parser panic on empty input",
+            "url": "https://github.com/acme/proj/pull/412"
+        }"#;
+        assert_eq!(
+            parse_pr(raw).unwrap(),
+            ReviewPr {
+                number: 412,
+                title: "Fix parser panic on empty input".to_string(),
+                author: "alice".to_string(),
+                head_branch: "alice/fix-parser".to_string(),
+                base_branch: "master".to_string(),
+                url: "https://github.com/acme/proj/pull/412".to_string(),
+                graph_prefix: String::new(),
+            }
+        );
     }
 
     #[test]

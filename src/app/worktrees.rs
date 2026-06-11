@@ -607,6 +607,7 @@ mod tests {
             scroll: 0,
             source: Default::default(),
             prs: None,
+            pr_number_input: None,
         });
         app
     }
@@ -797,6 +798,7 @@ mod tests {
             scroll: 0,
             source: crate::app::state::PickerSource::ReviewRequests,
             prs: Some(vec![pr]),
+            pr_number_input: None,
         });
 
         app.handle_review_key(crossterm::event::KeyEvent::new(

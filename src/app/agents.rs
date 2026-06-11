@@ -863,6 +863,49 @@ impl App {
         let plain = !key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+        // While `O`'s PR-number input is collecting digits, it owns the keys:
+        // digits append, backspace edits, Enter opens that PR, Esc returns to
+        // the list (without closing the picker). Everything else is inert.
+        if self
+            .state
+            .control
+            .review
+            .as_ref()
+            .is_some_and(|review| review.pr_number_input.is_some())
+        {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Some(review) = self.state.control.review.as_mut() {
+                        review.pr_number_input = None;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(input) = self
+                        .state
+                        .control
+                        .review
+                        .as_mut()
+                        .and_then(|review| review.pr_number_input.as_mut())
+                    {
+                        input.pop();
+                    }
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    if let Some(input) = self
+                        .state
+                        .control
+                        .review
+                        .as_mut()
+                        .and_then(|review| review.pr_number_input.as_mut())
+                    {
+                        input.push(c);
+                    }
+                }
+                KeyCode::Enter => self.open_typed_pr_for_review(),
+                _ => {}
+            }
+            return;
+        }
         // Which list the picker is showing; several commands dispatch on it.
         let prs_shown = self
             .state
@@ -885,6 +928,13 @@ impl App {
             // Plain `o` toggles between the repo's branches and the open PRs
             // awaiting the user's review.
             KeyCode::Char('o') if plain => self.toggle_review_picker_source(),
+            // `O` (shift+o) opens a PR by typed number — any PR in the repo,
+            // not just the ones awaiting the user's review.
+            KeyCode::Char('O') if plain => {
+                if let Some(review) = self.state.control.review.as_mut() {
+                    review.pr_number_input = Some(String::new());
+                }
+            }
             // The picker is not a text input, so plain `p` (or alt+p) submits a
             // PR. Only meaningful on the branch list — the PR list IS PRs.
             KeyCode::Char('p') if !prs_shown => self.submit_pr_for_review(),
@@ -1225,6 +1275,41 @@ impl App {
         else {
             return;
         };
+        self.open_pr_for_review(pr);
+    }
+
+    /// Enter on `O`'s PR-number input: look the typed number up via `gh`
+    /// (any PR in the repo, not just review requests) and open it for review
+    /// like a row in the PR list. The input stays up on a failed lookup so
+    /// the number can be corrected; toasts explain what went wrong.
+    fn open_typed_pr_for_review(&mut self) {
+        let Some(review) = self.state.control.review.as_ref() else {
+            return;
+        };
+        let Some(number) = review
+            .pr_number_input
+            .as_ref()
+            .and_then(|input| input.parse::<u64>().ok())
+        else {
+            return; // empty (or absurdly long) input: keep collecting digits
+        };
+        let repo_root = review.repo.root.clone();
+        match crate::workspace::pr_by_number(&repo_root, number) {
+            Ok(pr) => {
+                if let Some(review) = self.state.control.review.as_mut() {
+                    review.pr_number_input = None;
+                }
+                self.open_pr_for_review(pr);
+            }
+            Err(err) => self
+                .state
+                .set_home_toast(format!("PR #{number} lookup failed"), err),
+        }
+    }
+
+    /// Open `pr` for review, independent of what the Main pane holds (shared
+    /// by the PR list's Enter/Space and `O`'s typed PR number).
+    fn open_pr_for_review(&mut self, pr: crate::workspace::ReviewPr) {
         let Some(repo) = self
             .state
             .control

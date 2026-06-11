@@ -215,10 +215,32 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
         }
     }
 
+    // `O`'s PR-number input takes over the footer line while collecting
+    // digits; the key hints come back when it closes.
+    if let Some(input) = &review.pr_number_input {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " open PR #: ",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{input}▏"),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  enter open · esc cancel",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ])),
+            Rect::new(area.x, footer_y, area.width, 1),
+        );
+        return;
+    }
     let footer = if prs_shown {
-        " space open · c checkout · o branches · esc back"
+        " space open · c checkout · o branches · O pr# · esc back"
     } else {
-        " space open · c checkout · alt+p pr · o prs · esc back"
+        " space open · c checkout · alt+p pr · o prs · O pr# · esc back"
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(

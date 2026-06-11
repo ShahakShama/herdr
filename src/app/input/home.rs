@@ -878,6 +878,7 @@ mod tests {
             scroll: 0,
             source: Default::default(),
             prs: None,
+            pr_number_input: None,
         });
 
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
@@ -964,8 +965,46 @@ mod tests {
             scroll: 0,
             source: Default::default(),
             prs: None,
+            pr_number_input: None,
         });
         app
+    }
+
+    #[test]
+    fn picker_capital_o_collects_a_pr_number_and_esc_returns_to_the_list() {
+        let mut app = app_with_picker(0);
+
+        // `O` opens the PR-number input.
+        app.handle_review_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert_eq!(
+            app.state
+                .control
+                .review
+                .as_ref()
+                .unwrap()
+                .pr_number_input
+                .as_deref(),
+            Some("")
+        );
+
+        // Digits accumulate, backspace edits, and the list's own keys are
+        // inert while the input is collecting.
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+        app.handle_review_key(key('4'));
+        app.handle_review_key(key('1'));
+        app.handle_review_key(key('3'));
+        app.handle_review_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        app.handle_review_key(key('2'));
+        app.handle_review_key(key('j'));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert_eq!(review.pr_number_input.as_deref(), Some("412"));
+        assert_eq!(review.selected, 0, "`j` must not move the list while typing");
+
+        // Esc cancels the input but keeps the picker open.
+        app.handle_review_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert!(review.pr_number_input.is_none());
+        assert_eq!(app.state.mode, Mode::Review);
     }
 
     #[test]

@@ -24,7 +24,8 @@ use self::git::git_ahead_behind;
 pub use self::{
     git::{
         default_scan_root, derive_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, list_prs_for_my_review, list_review_branches, review_base,
+        git_status_cache_key, list_prs_for_my_review, list_review_branches, pr_by_number,
+        review_base,
         scan_repositories, Branch, GitSpaceMetadata, GitStatusCacheEntry, Repository, ReviewPr,
     },
     tab::Tab,

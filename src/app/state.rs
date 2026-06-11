@@ -841,6 +841,9 @@ pub struct ReviewState {
     /// [`PickerSource::ReviewRequests`], kept as a fallback when a refresh
     /// fails.
     pub prs: Option<Vec<crate::workspace::ReviewPr>>,
+    /// `Some(buffer)` while `O` has the picker collecting a PR number to open
+    /// directly (digits typed so far); `None` when the lists handle keys.
+    pub pr_number_input: Option<String>,
 }
 
 impl ReviewState {
@@ -853,6 +856,7 @@ impl ReviewState {
             scroll: 0,
             source: PickerSource::default(),
             prs: None,
+            pr_number_input: None,
         }
     }
 
