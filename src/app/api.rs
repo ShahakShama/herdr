@@ -243,7 +243,13 @@ impl App {
         use crate::events::PaneFocusDirection;
         use crate::layout::NavDirection;
 
-        if self.state.mode != Mode::Home || self.state.control.focus != FocusPane::Main {
+        // The review branch picker keeps the surface in `Mode::Review` while vim
+        // runs in Main (so you can step in to read the diff without closing it),
+        // so honour the signal in both modes — otherwise every vim edge nav is
+        // dropped while reviewing and even alt+h stops working.
+        if !matches!(self.state.mode, Mode::Home | Mode::Review)
+            || self.state.control.focus != FocusPane::Main
+        {
             return false;
         }
         let focused_pane = self
@@ -1178,5 +1184,53 @@ mod tests {
             app.state.toast.as_ref().map(|toast| toast.context.as_str()),
             Some("__herdr_original__ · 1")
         );
+    }
+
+    fn app_with_focused_main_workspace() -> (App, crate::layout::PaneId) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let workspace = crate::workspace::Workspace::test_new("ws");
+        let root = workspace.tabs[0].root_pane;
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.control.focus = crate::app::state::FocusPane::Main;
+        (app, root)
+    }
+
+    // A vim window at its leftmost edge emits the focus OSC; with no Main row to
+    // the left, herdr should hand focus to the sidebar. This must work while the
+    // review branch picker is open (Mode::Review), not only on the bare home.
+    #[test]
+    fn vim_focus_signal_yields_to_sidebar_while_review_picker_open() {
+        use crate::app::state::FocusPane;
+        use crate::events::PaneFocusDirection;
+
+        let (mut app, root) = app_with_focused_main_workspace();
+        app.state.mode = Mode::Review;
+
+        assert!(app.apply_pane_focus_signal(root, PaneFocusDirection::Left));
+        assert_ne!(app.state.control.focus, FocusPane::Main);
+    }
+
+    // Outside the home/review surfaces (e.g. Settings) the signal is inert and
+    // never steals focus from Main.
+    #[test]
+    fn vim_focus_signal_ignored_outside_home_and_review() {
+        use crate::app::state::FocusPane;
+        use crate::events::PaneFocusDirection;
+
+        let (mut app, root) = app_with_focused_main_workspace();
+        app.state.mode = Mode::Settings;
+
+        assert!(!app.apply_pane_focus_signal(root, PaneFocusDirection::Left));
+        assert_eq!(app.state.control.focus, FocusPane::Main);
     }
 }
