@@ -1223,7 +1223,7 @@ impl App {
         match output {
             Ok(out) if out.status.success() => {}
             Ok(out) => {
-                let message = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let message = concise_gh_checkout_error(&String::from_utf8_lossy(&out.stderr));
                 tracing::warn!(error = %message, "gh pr checkout failed");
                 self.state.set_home_toast("checkout failed", message);
                 return;
@@ -1347,13 +1347,19 @@ impl App {
             self.state.set_home_toast("open PR failed", err);
             return;
         }
+        // `--force`: when a local branch of the PR head's name already exists
+        // (and has diverged — the norm for stacked PRs), reset it to the PR head
+        // rather than failing the fast-forward. Safe here: the worktree is fresh
+        // and the review-base step resets it to `origin/<head>` regardless.
         let checkout_err = match std::process::Command::new("gh")
             .current_dir(&checkout_path)
-            .args(["pr", "checkout", &pr.number.to_string()])
+            .args(["pr", "checkout", &pr.number.to_string(), "--force"])
             .output()
         {
             Ok(out) if out.status.success() => None,
-            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Ok(out) => Some(concise_gh_checkout_error(&String::from_utf8_lossy(
+                &out.stderr,
+            ))),
             Err(err) => Some(format!("gh not available: {err}")),
         };
         if let Some(err) = checkout_err {
@@ -2101,6 +2107,27 @@ fn fetch_and_sync_review_worktree(
     Ok(())
 }
 
+/// Pull the actionable line out of a `gh pr checkout` failure. git narrates a
+/// checkout on stderr ("Previous HEAD position was…", "Switched to branch…") and
+/// tacks `hint:` lines onto failures, so the raw stderr buries the real cause —
+/// the `fatal:`/`error:` line — under noise that a one-line toast then truncates
+/// away. Surface that line; fall back to the last meaningful line, then the
+/// whole trimmed text.
+fn concise_gh_checkout_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+        .or_else(|| lines.iter().rev().find(|line| !line.starts_with("hint:")))
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| stderr.trim().to_string())
+}
+
 /// Prompt-line markers an agent renders before its input (`>` for Claude Code,
 /// `❯` for shells/other TUIs). Used to locate the typed region of the input.
 const PROMPT_MARKERS: [char; 2] = ['>', '❯'];
@@ -2163,7 +2190,32 @@ fn prompt_has_typed_text(row: &str, cursor_col: u16) -> bool {
 
 #[cfg(test)]
 mod claude_fix_tests {
-    use super::{claude_fix_prompt, claude_reply_prompt, prompt_has_typed_text};
+    use super::{
+        claude_fix_prompt, claude_reply_prompt, concise_gh_checkout_error, prompt_has_typed_text,
+    };
+
+    #[test]
+    fn checkout_error_surfaces_fatal_over_git_chatter() {
+        let stderr = "Previous HEAD position was b9d09856f8 blockifier: add validation\n\
+Switched to branch '03-19-apollo_propeller_wire_bounded_unit_channels'\n\
+hint: Diverging branches can't be fast-forwarded, you need to either:\n\
+hint: \n\
+hint: \tgit merge --no-ff\n\
+fatal: Not possible to fast-forward, aborting.";
+        assert_eq!(
+            concise_gh_checkout_error(stderr),
+            "fatal: Not possible to fast-forward, aborting."
+        );
+    }
+
+    #[test]
+    fn checkout_error_falls_back_past_hints() {
+        let stderr = "could not resolve to a PullRequest\nhint: try again";
+        assert_eq!(
+            concise_gh_checkout_error(stderr),
+            "could not resolve to a PullRequest"
+        );
+    }
 
     #[test]
     fn prompt_embeds_base_and_instructions() {
