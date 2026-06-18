@@ -71,6 +71,23 @@ fn render_home_pane_box(app: &AppState, frame: &mut Frame, area: Rect, focused: 
     inner
 }
 
+/// Scroll offset that keeps row `selected` within a `list_rows`-tall viewport,
+/// reusing `scroll` while the selection is already visible and otherwise
+/// scrolling just far enough to bring it back into view. This is what lets the
+/// list track the cursor instead of pinning the viewport to the top.
+fn scroll_to_keep_visible(scroll: usize, selected: usize, list_rows: usize) -> usize {
+    if list_rows == 0 {
+        return 0;
+    }
+    if selected < scroll {
+        selected
+    } else if selected >= scroll + list_rows {
+        selected + 1 - list_rows
+    } else {
+        scroll
+    }
+}
+
 /// Top half while reviewing: a branch picker for the repository under review.
 fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -124,28 +141,31 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
 
     if prs_shown {
         render_review_pr_rows(app, frame, body, review, main_pane_branch.as_deref(), list_rows);
-    } else if review.branches.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " no branches",
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-            ))),
-            Rect::new(body.x, body.y, body.width, 1),
-        );
     } else {
-        let scroll = review.scroll.min(review.selected);
-        for (row, (idx, branch)) in review
-            .branches
-            .iter()
-            .enumerate()
-            .skip(scroll)
-            .enumerate()
-        {
+        let visible = review.filtered_branches();
+        if visible.is_empty() {
+            let empty = if review.search.is_some() {
+                " no matches"
+            } else {
+                " no branches"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    empty,
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ))),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+        }
+        let scroll = scroll_to_keep_visible(review.scroll, review.selected, list_rows);
+        for (pos, &branch_idx) in visible.iter().enumerate().skip(scroll) {
+            let row = pos - scroll;
             if row >= list_rows {
                 break;
             }
             let y = body.y + row as u16;
-            let selected = idx == review.selected;
+            let branch = &review.branches[branch_idx];
+            let selected = pos == review.selected;
             let is_main_pane = main_pane_branch.as_deref() == Some(branch.name.as_str());
             if selected {
                 let buf = frame.buffer_mut();
@@ -237,10 +257,31 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
         );
         return;
     }
+    // While `/`'s filter is open, the footer echoes the query and its hints.
+    if let Some(query) = &review.search {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " /",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{query}▏"),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  enter open · esc clear",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ])),
+            Rect::new(area.x, footer_y, area.width, 1),
+        );
+        return;
+    }
     let footer = if prs_shown {
         " space open · c checkout · o branches · O pr# · esc back"
     } else {
-        " space open · c checkout · alt+p pr · o prs · O pr# · esc back"
+        " space open · c checkout · alt+p pr · / filter · o prs · O pr# · esc back"
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -275,8 +316,9 @@ fn render_review_pr_rows(
         return;
     }
 
-    let scroll = review.scroll.min(review.selected);
-    for (row, (idx, pr)) in prs.iter().enumerate().skip(scroll).enumerate() {
+    let scroll = scroll_to_keep_visible(review.scroll, review.selected, list_rows);
+    for (idx, pr) in prs.iter().enumerate().skip(scroll) {
+        let row = idx - scroll;
         if row >= list_rows {
             break;
         }

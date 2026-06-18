@@ -79,6 +79,15 @@ impl App {
                     self.toggle_review_row();
                     return false;
                 }
+                // alt+R (shift) reloads the review: kill the current `vimrev`
+                // and re-spawn it against the freshly-resolved base for the
+                // current branch (its graphite parent / the default branch), so
+                // the diff reflects new commits or a re-parented branch. Opens
+                // the row if it isn't showing yet.
+                KeyCode::Char('R') => {
+                    self.reload_review_row();
+                    return false;
+                }
                 KeyCode::Char('t') => {
                     self.toggle_terminal_row();
                     return false;
@@ -521,6 +530,18 @@ impl AppState {
         }
     }
 
+    /// Mutate the review picker's active fuzzy query, then snap the selection
+    /// back to the top (best match) since the filtered list just changed.
+    pub(crate) fn edit_review_search(&mut self, edit: impl FnOnce(&mut String)) {
+        if let Some(review) = self.control.review.as_mut() {
+            if let Some(query) = review.search.as_mut() {
+                edit(query);
+            }
+            review.selected = 0;
+            review.scroll = 0;
+        }
+    }
+
     fn request_home_kill_agent(&mut self) {
         // Confirm before killing the marked agent (the Agents-pane selection, or
         // the agent shown in Main when that pane is unfocused).
@@ -901,6 +922,7 @@ mod tests {
             source: Default::default(),
             prs: None,
             pr_number_input: None,
+            search: None,
         });
 
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
@@ -988,8 +1010,47 @@ mod tests {
             source: Default::default(),
             prs: None,
             pr_number_input: None,
+            search: None,
         });
         app
+    }
+
+    #[test]
+    fn picker_slash_fuzzy_filters_branches_and_esc_clears() {
+        let mut app = app_with_picker(0);
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
+
+        // `/` opens the fuzzy filter; the full list is still shown.
+        app.handle_review_key(key('/'));
+        assert!(app.state.control.review.as_ref().unwrap().search.is_some());
+        assert_eq!(app.state.control.review.as_ref().unwrap().visible_len(), 2);
+
+        // Typing narrows the list to the matching branch — and `f`/`e` land in
+        // the query rather than acting as the picker's command keys.
+        app.handle_review_key(key('f'));
+        app.handle_review_key(key('e'));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert_eq!(review.search.as_deref(), Some("fe"));
+        assert_eq!(review.visible_len(), 1);
+        assert_eq!(
+            review.selected_branch().map(|b| b.name.as_str()),
+            Some("feat")
+        );
+
+        // Backspacing to a query that matches nothing leaves an empty list, and
+        // the selection stays clamped at 0.
+        app.handle_review_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        app.handle_review_key(key('z'));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert_eq!(review.visible_len(), 0);
+        assert_eq!(review.selected, 0);
+
+        // Esc closes the filter (not the picker) and restores the full list.
+        app.handle_review_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        let review = app.state.control.review.as_ref().unwrap();
+        assert!(review.search.is_none());
+        assert_eq!(review.visible_len(), 2);
+        assert_eq!(app.state.mode, Mode::Review);
     }
 
     #[test]

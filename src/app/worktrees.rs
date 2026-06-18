@@ -608,6 +608,7 @@ mod tests {
             source: Default::default(),
             prs: None,
             pr_number_input: None,
+            search: None,
         });
         app
     }
@@ -799,6 +800,7 @@ mod tests {
             source: crate::app::state::PickerSource::ReviewRequests,
             prs: Some(vec![pr]),
             pr_number_input: None,
+            search: None,
         });
 
         app.handle_review_key(crossterm::event::KeyEvent::new(
@@ -812,10 +814,11 @@ mod tests {
             app.state.workspaces[0].reviewing_pr.as_ref().map(|p| p.number),
             Some(7)
         );
-        // ...and the picker stayed open and focused, still on the PR list with
-        // the selection on the PR just opened.
+        // ...and the picker stayed open, still on the PR list with the
+        // selection on the PR just opened, but focus moved to the new workspace
+        // in Main.
         assert_eq!(app.state.mode, Mode::Review);
-        assert_eq!(app.state.control.focus, crate::app::state::FocusPane::Control);
+        assert_eq!(app.state.control.focus, crate::app::state::FocusPane::Main);
         let review = app.state.control.review.as_ref().expect("picker still open");
         assert_eq!(review.source, crate::app::state::PickerSource::ReviewRequests);
         assert_eq!(review.selected, 0);

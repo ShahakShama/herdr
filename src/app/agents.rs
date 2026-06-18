@@ -607,7 +607,7 @@ impl App {
             .map(|s| s.to_string())
             .collect();
         let (rows, cols) = self.state.estimate_pane_size();
-        match self.spawn_agent_workspace(checkout_path.to_path_buf(), rows, cols, &argv, true) {
+        let spawned = match self.spawn_agent_workspace(checkout_path.to_path_buf(), rows, cols, &argv, true) {
             Ok((ws_idx, _tab, pane_id)) => {
                 if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
                     ws.set_custom_name(name.clone());
@@ -633,19 +633,28 @@ impl App {
                         terminal.set_manual_label(name);
                     }
                 }
-                // Surface the new agent in Main while staying in the home shell
-                // (with the picker open, the close below keeps focus on it).
+                // Surface the new agent in Main.
                 self.state.active = Some(ws_idx);
                 self.state.selected = ws_idx;
-                self.state.control.focus = crate::app::state::FocusPane::Main;
+                true
             }
             Err(err) => {
                 let body = self.agent_start_error_body(err);
                 tracing::warn!(error = %body.message, "create-agent spawn failed");
                 self.state.set_home_toast("create agent failed", body.message);
+                false
             }
-        }
+        };
+        // `close_create_form_after_agent` re-opens the branch picker (focused on
+        // the Control half) when one was open, so more agents can be created.
         self.close_create_form_after_agent();
+        // On success, move focus to the new agent in Main — the picker stays
+        // open behind it. On failure, leave focus on the picker so the user can
+        // retry. This is what carries focus off the repo list when an agent is
+        // created.
+        if spawned {
+            self.state.control.focus = crate::app::state::FocusPane::Main;
+        }
     }
 
     /// Close the create-agent form after the agent was (attempted to be)
@@ -906,6 +915,40 @@ impl App {
             }
             return;
         }
+        // While `/`'s fuzzy filter is collecting a query, it owns the keys:
+        // printable characters extend the query (snapping back to the best
+        // match), backspace edits it, the arrows still move the highlight,
+        // Enter picks it, and Esc closes the filter without closing the picker.
+        if self
+            .state
+            .control
+            .review
+            .as_ref()
+            .is_some_and(|review| review.search.is_some())
+        {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Some(review) = self.state.control.review.as_mut() {
+                        review.search = None;
+                        review.selected = 0;
+                        review.scroll = 0;
+                    }
+                }
+                KeyCode::Up => self.state.review_move_selection(-1),
+                KeyCode::Down => self.state.review_move_selection(1),
+                KeyCode::Enter => {
+                    self.pick_branch_for_create(key.modifiers.contains(KeyModifiers::ALT));
+                }
+                KeyCode::Backspace => self.state.edit_review_search(|query| {
+                    query.pop();
+                }),
+                KeyCode::Char(c) if plain => {
+                    self.state.edit_review_search(|query| query.push(c));
+                }
+                _ => {}
+            }
+            return;
+        }
         // Which list the picker is showing; several commands dispatch on it.
         let prs_shown = self
             .state
@@ -925,6 +968,15 @@ impl App {
             KeyCode::Char('k') if plain => self.state.review_move_selection(-1),
             KeyCode::Char('j') if plain => self.state.review_move_selection(1),
             KeyCode::Char('h') | KeyCode::Char('l') if plain => {}
+            // `/` opens the fuzzy filter over the branch list (the PR list has
+            // its own `O` number lookup, so `/` is branch-only).
+            KeyCode::Char('/') if plain && !prs_shown => {
+                if let Some(review) = self.state.control.review.as_mut() {
+                    review.search = Some(String::new());
+                    review.selected = 0;
+                    review.scroll = 0;
+                }
+            }
             // Plain `o` toggles between the repo's branches and the open PRs
             // awaiting the user's review.
             KeyCode::Char('o') if plain => self.toggle_review_picker_source(),
@@ -1001,6 +1053,9 @@ impl App {
             };
             review.selected = 0;
             review.scroll = 0;
+            // The fuzzy filter only applies to the branch list; drop it so the
+            // PR list (and the branch list on the way back) starts unfiltered.
+            review.search = None;
         }
     }
 
@@ -1010,7 +1065,7 @@ impl App {
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
-        let Some(branch) = review.branches.get(review.selected) else {
+        let Some(branch) = review.selected_branch() else {
             return;
         };
         // The base must be a local branch name; strip a remote prefix if present.
@@ -1041,7 +1096,7 @@ impl App {
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
-        let Some(branch) = review.branches.get(review.selected) else {
+        let Some(branch) = review.selected_branch() else {
             return;
         };
         // The checkout target must be a local branch name; strip a remote prefix
@@ -1407,11 +1462,12 @@ impl App {
             self.toggle_review_row();
         }
         self.state.mark_session_dirty();
-        // Keep the picker open and focused — selection still on the PR just
-        // opened — so more PRs can be opened without reopening it; the new
-        // workspace is surfaced in Main behind it. Esc still closes the picker.
+        // Keep the picker open — selection still on the PR just opened — so more
+        // PRs can be opened without reopening it, but move focus to the new
+        // workspace in Main (mirroring the branch-create flow in
+        // `finish_create_agent`). Esc/click back into the picker still works.
         self.state.mode = Mode::Review;
-        self.state.control.focus = crate::app::state::FocusPane::Control;
+        self.state.control.focus = crate::app::state::FocusPane::Main;
         self.state.set_home_toast("reviewing", toast);
     }
 
@@ -1459,7 +1515,7 @@ impl App {
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
-        let Some(branch) = review.branches.get(review.selected) else {
+        let Some(branch) = review.selected_branch() else {
             return;
         };
         let repo_root = review.repo.root.clone();
@@ -1519,6 +1575,29 @@ impl App {
                 self.state
                     .set_home_toast("PR failed", format!("gh not available: {err}"));
             }
+        }
+    }
+
+    /// alt+R: reload the active workspace's review row by re-running `vimrev`
+    /// against a freshly-resolved base. When the row is open this kills and
+    /// re-spawns it (so the diff picks up new commits or a re-parented branch);
+    /// when it's closed it just opens a fresh one. Either path reads the
+    /// current branch and re-derives the base (graphite parent / default
+    /// branch, or the PR's `origin/<base>` while reviewing a PR).
+    pub(crate) fn reload_review_row(&mut self) {
+        use crate::pane::PaneRole;
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let review_open = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.pane_with_role(PaneRole::Review).is_some());
+        if review_open {
+            self.respawn_review_row_after_checkout(ws_idx);
+        } else {
+            self.toggle_review_row();
         }
     }
 
@@ -1900,8 +1979,14 @@ impl App {
                     .try_send_bytes(bytes::Bytes::from(text_bytes))
                     .map_err(|err| err.to_string())
                     .and_then(|()| {
-                        // Submit as a separate Enter event, mirroring the
-                        // `pane.send_input` API path.
+                        // Submit with a separate Enter, sent inline right after
+                        // the paste — exactly as the API `pane.send_input` path
+                        // does (text bytes, then key bytes, same channel, in
+                        // order). The agent ingests them in order, so the Enter
+                        // lands as a submit. (A deferred Enter was tried here and
+                        // failed to submit at all; the prompts are multi-line so
+                        // the agent collapses them to a paste placeholder that a
+                        // following Enter reliably submits.)
                         let enter = runtime.encode_terminal_key(
                             crossterm::event::KeyEvent::new(
                                 crossterm::event::KeyCode::Enter,
@@ -2135,10 +2220,17 @@ const PROMPT_MARKERS: [char; 2] = ['>', '❯'];
 /// The prompt sent to the agent by `alt+g`. `base` is the diff base the review
 /// row uses, embedded so the agent targets exactly what's under review.
 fn claude_fix_prompt(base: &str) -> String {
+    // Keep this MULTI-LINE. Claude Code collapses a multi-line bracketed paste
+    // into a compact "[Pasted text]" placeholder, which lets the Enter that
+    // `send_claude_fix_command` sends right after submit it reliably. A
+    // single-line paste is inserted inline and the following Enter doesn't
+    // reliably submit it — the bug this shape works around (the PR-reply prompt
+    // is multi-line for the same reason).
     format!(
-        "Review the diff in this branch against its base (`git diff {base}...HEAD`). \
-Find every comment that starts with `CLAUDE:` and fix the code according to that \
-comment. After applying each fix, remove the `CLAUDE:` comment."
+        "Review the diff in this branch against its base (`git diff {base}...HEAD`).\n\
+1. Find every comment that starts with `CLAUDE:`.\n\
+2. Fix the code according to that comment.\n\
+3. After applying each fix, remove the `CLAUDE:` comment."
     )
 }
 

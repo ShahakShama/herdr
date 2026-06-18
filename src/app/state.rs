@@ -844,6 +844,9 @@ pub struct ReviewState {
     /// `Some(buffer)` while `O` has the picker collecting a PR number to open
     /// directly (digits typed so far); `None` when the lists handle keys.
     pub pr_number_input: Option<String>,
+    /// `Some(query)` while `/`'s fuzzy filter is active over the branch list
+    /// (the query typed so far, possibly empty); `None` shows the full list.
+    pub search: Option<String>,
 }
 
 impl ReviewState {
@@ -857,15 +860,38 @@ impl ReviewState {
             source: PickerSource::default(),
             prs: None,
             pr_number_input: None,
+            search: None,
         }
     }
 
     /// Number of rows in the currently-shown list.
     pub fn visible_len(&self) -> usize {
         match self.source {
-            PickerSource::Branches => self.branches.len(),
+            PickerSource::Branches => self.filtered_branches().len(),
             PickerSource::ReviewRequests => self.prs.as_ref().map_or(0, Vec::len),
         }
+    }
+
+    /// Indices into [`Self::branches`] shown in the picker: when `/`'s fuzzy
+    /// filter is active with a non-empty query, only the matching branches,
+    /// best match first; otherwise the whole list in its original order.
+    pub fn filtered_branches(&self) -> Vec<usize> {
+        match self.search.as_deref() {
+            Some(query) if !query.is_empty() => {
+                fuzzy_filter(self.branches.iter().map(|b| b.name.as_str()), query)
+            }
+            _ => (0..self.branches.len()).collect(),
+        }
+    }
+
+    /// The branch the picker's selection currently points at, mapped through
+    /// the active filter. `None` when the PR list is shown or nothing matches.
+    pub fn selected_branch(&self) -> Option<&crate::workspace::Branch> {
+        if self.source != PickerSource::Branches {
+            return None;
+        }
+        let idx = *self.filtered_branches().get(self.selected)?;
+        self.branches.get(idx)
     }
 
     /// The PR selected in the review-requests list, when that list is shown.
@@ -883,15 +909,66 @@ impl ReviewState {
     /// is left untouched.
     pub fn refresh_branches(&mut self) {
         let selected_branch = (self.source == PickerSource::Branches)
-            .then(|| self.branches.get(self.selected).map(|b| b.name.clone()))
+            .then(|| self.selected_branch().map(|b| b.name.clone()))
             .flatten();
         self.branches = crate::workspace::list_review_branches(&self.repo.root);
         if self.source == PickerSource::Branches {
+            let visible = self.filtered_branches();
             self.selected = selected_branch
-                .and_then(|name| self.branches.iter().position(|b| b.name == name))
-                .unwrap_or_else(|| self.selected.min(self.branches.len().saturating_sub(1)));
+                .and_then(|name| {
+                    visible
+                        .iter()
+                        .position(|&idx| self.branches[idx].name == name)
+                })
+                .unwrap_or_else(|| self.selected.min(visible.len().saturating_sub(1)));
         }
     }
+}
+
+/// Indices of the `items` that fuzzy-match `query`, best match first. Stable on
+/// ties, so equal-scoring items keep their original order.
+fn fuzzy_filter<'a>(items: impl Iterator<Item = &'a str>, query: &str) -> Vec<usize> {
+    let needle: Vec<char> = query.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let mut scored: Vec<(usize, i32)> = items
+        .enumerate()
+        .filter_map(|(i, text)| fuzzy_score(text, &needle).map(|score| (i, score)))
+        .collect();
+    // Stable sort keeps the original (enumeration) order for equal scores.
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
+/// Score `text` against the lowercase `needle` chars, or `None` when `needle`
+/// isn't a subsequence of `text`. Higher is better: consecutive matches and
+/// matches at a word boundary (string start or after `/ - _ .` or a space)
+/// score extra, so `feat` ranks `feat/x` above `refactor`.
+fn fuzzy_score(text: &str, needle: &[char]) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let mut score = 0;
+    let mut next = 0;
+    let mut prev_matched = false;
+    let mut prev_char: Option<char> = None;
+    for ch in text.chars() {
+        if next < needle.len() && ch.to_ascii_lowercase() == needle[next] {
+            score += 1;
+            if prev_matched {
+                score += 3;
+            }
+            let at_boundary =
+                prev_char.map_or(true, |p| matches!(p, '/' | '-' | '_' | '.' | ' '));
+            if at_boundary {
+                score += 5;
+            }
+            next += 1;
+            prev_matched = true;
+        } else {
+            prev_matched = false;
+        }
+        prev_char = Some(ch);
+    }
+    (next == needle.len()).then_some(score)
 }
 
 /// A row in the create-agent form. Rows are navigated with up/down and the
