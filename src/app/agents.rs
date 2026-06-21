@@ -1604,11 +1604,15 @@ impl App {
             self.toggle_review_row();
         }
         self.state.mark_session_dirty();
-        // Keep the picker open — selection still on the PR just opened — so more
-        // PRs can be opened without reopening it, but move focus to the new
-        // workspace in Main (mirroring the branch-create flow in
-        // `finish_create_agent`). Esc/click back into the picker still works.
-        self.state.mode = Mode::Review;
+        // Land in the new review workspace (Main) on a clean home surface. This
+        // is entered from the PR pane, not the branch picker, so there is no
+        // picker to keep open — staying in `Mode::Review` here (with no
+        // `ReviewState`) renders the top-left pane blank and strands it. Drop any
+        // stale picker state and reset the PR pane to its people list so it shows
+        // correctly when refocused.
+        self.state.mode = Mode::Home;
+        self.state.control.review = None;
+        self.state.control.pr_view = crate::app::state::PrPaneView::People;
         self.state.control.focus = crate::app::state::FocusPane::Main;
         self.state.set_home_toast("reviewing", toast);
     }

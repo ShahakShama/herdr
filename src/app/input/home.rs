@@ -209,7 +209,7 @@ impl App {
                 KeyCode::Char('l') if plain => self.state.pr_toggle_green(),
                 KeyCode::Char('o') if plain => self.state.pr_toggle_grey(),
                 KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_person_pr_for_review(),
-                KeyCode::Char('q') if plain => self.state.pr_back_to_people(),
+                KeyCode::Char('q') | KeyCode::Esc if plain => self.state.pr_back_to_people(),
                 KeyCode::Char('p') if plain => {
                     self.state.control.pr_number_jump = Some(String::new());
                 }

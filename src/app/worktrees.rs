@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn space_on_a_pr_reuses_the_workspace_and_keeps_the_picker_open() {
+    fn space_on_a_pr_reuses_the_workspace_and_lands_in_main() {
         let pr = crate::workspace::ReviewPr {
             number: 7,
             title: "Add feature".into(),
@@ -814,14 +814,17 @@ mod tests {
             app.state.workspaces[0].reviewing_pr.as_ref().map(|p| p.number),
             Some(7)
         );
-        // ...and the picker stayed open, still on the PR list with the
-        // selection on the PR just opened, but focus moved to the new workspace
-        // in Main.
-        assert_eq!(app.state.mode, Mode::Review);
+        // ...and we land in the review workspace in Main on a clean home surface:
+        // the picker is dropped (not left dangling in Mode::Review, which would
+        // render the top-left pane blank), and the PR pane resets to its people
+        // list.
+        assert_eq!(app.state.mode, Mode::Home);
         assert_eq!(app.state.control.focus, crate::app::state::FocusPane::Main);
-        let review = app.state.control.review.as_ref().expect("picker still open");
-        assert_eq!(review.source, crate::app::state::PickerSource::ReviewRequests);
-        assert_eq!(review.selected, 0);
+        assert!(app.state.control.review.is_none());
+        assert!(matches!(
+            app.state.control.pr_view,
+            crate::app::state::PrPaneView::People
+        ));
         assert_eq!(app.state.toast.as_ref().expect("toast set").title, "reviewing");
     }
 
