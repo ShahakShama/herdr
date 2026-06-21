@@ -297,8 +297,10 @@ struct StackNode {
     order: usize,
 }
 
-/// A row in a rendered stack tree: the PR key plus the box-drawing connector
-/// prefix (`├ `, `└─┬ `, `│ └ `, …) that draws the stack shape.
+/// A row in a rendered stack tree: the PR key plus an indentation prefix
+/// (two spaces per nesting level) that conveys the stack shape. A linear chain
+/// stays at a single level; a fork nests each branch a further level so the
+/// separate stacks are visually distinguishable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackRow {
     pub key: PrKey,
@@ -351,11 +353,13 @@ impl StackGraph {
         StackGraph { nodes }
     }
 
-    /// Render the visible subset as a forest of box-drawing stack trees. A
-    /// hidden node (failing `visible`) emits nothing but its visible descendants
+    /// Render the visible subset as a forest of indented stack trees. A hidden
+    /// node (failing `visible`) emits nothing but its visible descendants
     /// re-parent onto the nearest visible ancestor (req 10). Roots are grouped by
     /// repo (so each repo's stacks are contiguous), then by first-appearance.
-    /// Each emitted row carries its connector prefix (`├ `, `└─┬ `, `│ └ `, …).
+    /// Each emitted row carries an indentation prefix: a linear chain holds one
+    /// nesting level, and each branch of a fork nests a further level so the
+    /// separate stacks are distinguishable.
     pub fn visible_forest(&self, visible: &dyn Fn(&PrKey) -> bool) -> Vec<StackRow> {
         // Nearest visible ancestor of `key` (climbing through hidden parents).
         let visible_parent = |key: &PrKey| -> Option<PrKey> {
@@ -390,18 +394,20 @@ impl StackGraph {
         let mut out = Vec::new();
         let mut visited = HashSet::new();
         for root in &roots {
-            self.walk_tree(root, &[], true, true, &vis_children, &mut out, &mut visited);
+            self.walk_levels(root, 0, &vis_children, &mut out, &mut visited);
         }
         out
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn walk_tree(
+    /// Indent a stack by *fork depth* rather than raw chain depth. A node with a
+    /// single child is a linear continuation and stays at the same level; a root
+    /// or a fork (≥2 children) nests each child a level deeper, and each extra
+    /// branch one level deeper still, so distinct stacks read apart. The root
+    /// sits at level 0; everything beneath it holds at least one nesting level.
+    fn walk_levels(
         &self,
         key: &PrKey,
-        ancestors: &[bool],
-        is_last: bool,
-        is_root: bool,
+        level: usize,
         vis_children: &HashMap<PrKey, Vec<PrKey>>,
         out: &mut Vec<StackRow>,
         visited: &mut HashSet<PrKey>,
@@ -409,32 +415,17 @@ impl StackGraph {
         if !visited.insert(key.clone()) {
             return; // cycle guard
         }
+        out.push(StackRow { key: key.clone(), prefix: "  ".repeat(level) });
         let children = vis_children.get(key).cloned().unwrap_or_default();
-        let mut prefix = String::new();
-        if !is_root {
-            for &more in ancestors {
-                prefix.push_str(if more { "│ " } else { "  " });
+        if children.len() == 1 && level > 0 {
+            // Linear continuation: keep the stack flat at its current level.
+            self.walk_levels(&children[0], level, vis_children, out, visited);
+        } else {
+            // Root or fork: nest each branch one level deeper, and each further
+            // branch one level deeper again so the stacks stay distinguishable.
+            for (k, child) in children.iter().enumerate() {
+                self.walk_levels(child, level + 1 + k, vis_children, out, visited);
             }
-            prefix.push(if is_last { '└' } else { '├' });
-            if !children.is_empty() {
-                prefix.push_str("─┬");
-            }
-            prefix.push(' ');
-        }
-        out.push(StackRow { key: key.clone(), prefix });
-        for (i, child) in children.iter().enumerate() {
-            let child_is_last = i + 1 == children.len();
-            // The root sits at column 0 with no spine; deeper levels inherit a
-            // `│`/space column per ancestor depending on whether it has more
-            // siblings below.
-            let child_ancestors: Vec<bool> = if is_root {
-                ancestors.to_vec()
-            } else {
-                let mut a = ancestors.to_vec();
-                a.push(!is_last);
-                a
-            };
-            self.walk_tree(child, &child_ancestors, child_is_last, false, vis_children, out, visited);
         }
     }
 }
@@ -1105,12 +1096,12 @@ mod tests {
                 .collect();
         let rows = graph.visible_forest(&|key| visible_keys.contains(key));
         let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
-        // #2 hidden, so #3 attaches directly under #1 (the root).
-        assert_eq!(view, vec![(1, ""), (3, "└ ")]);
+        // #2 hidden, so #3 attaches directly under #1 (the root) at one nesting.
+        assert_eq!(view, vec![(1, ""), (3, "  ")]);
     }
 
     #[test]
-    fn stack_visible_forest_draws_box_connectors() {
+    fn stack_visible_forest_keeps_linear_chains_flat() {
         let prs = vec![
             pr(1, "alice", "main", "a"),
             pr(2, "alice", "a", "b"),
@@ -1119,8 +1110,28 @@ mod tests {
         let graph = StackGraph::build(&prs);
         let rows = graph.visible_forest(&|_| true);
         let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
-        // Linear A->B->C: root flush, B is A's only child (└─┬), C under B.
-        assert_eq!(view, vec![(1, ""), (2, "└─┬ "), (3, "  └ ")]);
+        // Linear A->B->C: root flush, the whole chain holds at one nesting level.
+        assert_eq!(view, vec![(1, ""), (2, "  "), (3, "  ")]);
+    }
+
+    #[test]
+    fn stack_visible_forest_nests_each_fork_branch_a_level_deeper() {
+        // #1 forks into [#2 -> #3] and [#5]; the linear chain stays at one level,
+        // the second fork branch gets an extra level so the stacks read apart.
+        let prs = vec![
+            pr(1, "alice", "main", "a"), // root
+            pr(2, "alice", "a", "b"),    // child of #1
+            pr(3, "alice", "b", "c"),    // child of #2 (linear continuation)
+            pr(5, "alice", "a", "e"),    // child of #1 (fork sibling of #2)
+        ];
+        let graph = StackGraph::build(&prs);
+        let rows = graph.visible_forest(&|_| true);
+        let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
+        assert_eq!(
+            view,
+            vec![(1, ""), (2, "  "), (3, "  "), (5, "    ")],
+            "branch 0 (#2->#3) holds level 1; branch 1 (#5) nests to level 2"
+        );
     }
 
     #[test]
