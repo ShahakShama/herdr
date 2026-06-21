@@ -34,6 +34,9 @@ pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
 pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
+/// How often to refresh the PR pane's per-person review-status snapshot (one
+/// `gh api graphql` call per repo). 30s per the user.
+const PR_STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -82,6 +85,10 @@ pub struct App {
     pub(crate) git_refresh_in_flight: bool,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    /// Background PR-status refresh bookkeeping for the PR pane; mirrors the
+    /// git-status refresh above. The deadline is gated while a fetch is in flight.
+    pub(crate) last_pr_status_refresh: Instant,
+    pub(crate) pr_status_refresh_in_flight: bool,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
@@ -551,6 +558,8 @@ impl App {
             git_refresh_in_flight: false,
             git_refresh_due_after_in_flight: false,
             git_status_cache: HashMap::new(),
+            last_pr_status_refresh: Instant::now() - PR_STATUS_REFRESH_INTERVAL,
+            pr_status_refresh_in_flight: false,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
             next_auto_update_check: auto_updates_enabled(no_session)
@@ -3166,6 +3175,8 @@ mod tests {
     #[test]
     fn next_loop_deadline_includes_session_save_deadline() {
         let mut app = test_app();
+        // Quiet the PR-status refresh timer so it doesn't beat this assertion.
+        app.state.control.repos.clear();
         let now = Instant::now();
         app.session_save_deadline = Some(now + Duration::from_secs(2));
         app.next_resize_poll = now + Duration::from_secs(5);
@@ -3180,6 +3191,7 @@ mod tests {
     #[test]
     fn headless_next_loop_deadline_ignores_resize_poll() {
         let mut app = test_app();
+        app.state.control.repos.clear();
         let now = Instant::now();
         app.next_resize_poll = now + Duration::from_millis(100);
         app.session_save_deadline = Some(now + Duration::from_secs(2));
@@ -3194,6 +3206,7 @@ mod tests {
     #[test]
     fn headless_next_loop_deadline_returns_none_when_resize_poll_is_only_deadline() {
         let mut app = test_app();
+        app.state.control.repos.clear();
         let now = Instant::now();
         app.next_resize_poll = now - Duration::from_millis(1);
         app.config_diagnostic_deadline = None;
@@ -3222,6 +3235,7 @@ mod tests {
     #[test]
     fn next_loop_deadline_includes_selection_autoscroll_deadline() {
         let mut app = test_app();
+        app.state.control.repos.clear();
         let now = Instant::now();
         app.next_resize_poll = now + Duration::from_millis(300);
         app.selection_autoscroll_deadline = Some(now + Duration::from_millis(5));

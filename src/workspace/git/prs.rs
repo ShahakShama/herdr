@@ -71,6 +71,21 @@ pub fn pr_by_number(repo_root: &Path, number: u64) -> Result<ReviewPr, String> {
     parse_pr(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// The number of the open PR whose head is `branch` in `repo_root`, via
+/// `gh pr view <branch> --json number`. `None` when there's no such PR (or `gh`
+/// is unavailable). Used by the `alt+w` "open in Reviewable" action.
+pub fn pr_number_for_ref(repo_root: &Path, branch: &str) -> Option<u64> {
+    let output = std::process::Command::new("gh")
+        .current_dir(repo_root)
+        .args(["pr", "view", branch, "--json", "number", "-q", ".number"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// Raw shape of one PR in `gh`'s
 /// `--json number,title,author,headRefName,baseRefName,url` output, shared by
 /// the list (`gh pr list`) and single-PR (`gh pr view`) queries.

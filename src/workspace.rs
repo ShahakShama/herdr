@@ -23,10 +23,11 @@ mod tab;
 use self::git::git_ahead_behind;
 pub use self::{
     git::{
-        default_scan_root, derive_label_from_cwd, git_branch, git_space_metadata,
-        git_status_cache_key, list_prs_for_my_review, list_review_branches, pr_by_number,
-        review_base,
-        scan_repositories, Branch, GitSpaceMetadata, GitStatusCacheEntry, Repository, ReviewPr,
+        default_scan_root, derive_label_from_cwd, fetch_pr_status_snapshot, git_branch,
+        git_space_metadata, git_status_cache_key, github_owner_name, list_prs_for_my_review,
+        list_review_branches, pr_by_number, pr_number_for_ref, review_base, scan_repositories,
+        Branch, FetchedPr, GitSpaceMetadata, GitStatusCacheEntry, PersonPr, PersonPrs, PrBucket,
+        PrKey, PrStatusSnapshot, Repository, ReviewPr, StackGraph, StackRow,
     },
     tab::Tab,
 };

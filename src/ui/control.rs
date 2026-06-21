@@ -10,9 +10,10 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::state::{CreateFormRow, FocusPane, Mode};
+use crate::app::state::{AgentsPaneView, CreateFormRow, FocusPane, Mode, PrPaneView};
 use crate::app::AppState;
 use crate::terminal::TerminalRuntimeRegistry;
+use crate::workspace::PrBucket;
 
 use super::sidebar::{agent_panel_entries_all, expanded_sidebar_sections};
 use super::status::{agent_icon, state_label, state_label_color};
@@ -27,17 +28,18 @@ pub(super) fn render_home_sidebar(
     area: Rect,
 ) {
     let _ = terminal_runtimes;
-    let (control_area, agents_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (top_area, agents_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
 
     // Each half is framed in a focus box: a THICK accent border when it holds
-    // focus, a plain dim border otherwise. The Review picker lives in the
-    // Control half, so it shares the Control focus state.
-    let control_inner =
-        render_home_pane_box(app, frame, control_area, app.control.focus == FocusPane::Control);
+    // focus, a plain dim border otherwise. The top-left half shows the PR pane,
+    // or the create-agent branch picker while in Mode::Review (which shares the
+    // PR-pane focus slot).
+    let top_inner =
+        render_home_pane_box(app, frame, top_area, app.control.focus == FocusPane::Prs);
     if app.mode == Mode::Review {
-        render_review_half(app, frame, control_inner);
+        render_review_half(app, frame, top_inner);
     } else {
-        render_control_half(app, frame, control_inner);
+        render_pr_pane(app, frame, top_inner);
     }
 
     let agents_inner =
@@ -86,6 +88,366 @@ fn scroll_to_keep_visible(scroll: usize, selected: usize, list_rows: usize) -> u
     } else {
         scroll
     }
+}
+
+/// Top-left pane: the PR-status summary (people + bucket counts), or one
+/// person's PRs drilled in. Replaces the old repository list.
+fn render_pr_pane(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let focused = app.control.focus == FocusPane::Prs;
+    match &app.control.pr_view {
+        PrPaneView::People => render_pr_people(app, frame, area, focused),
+        PrPaneView::Person { login } => render_pr_person(app, frame, area, focused, login),
+    }
+}
+
+/// Bucket colour: RED = waiting for me, GREEN = lgtm'd, GREY = on the other side.
+fn bucket_color(bucket: PrBucket, p: &crate::app::state::Palette) -> ratatui::style::Color {
+    match bucket {
+        PrBucket::Red => p.red,
+        PrBucket::Green => p.green,
+        PrBucket::Grey => p.overlay0,
+    }
+}
+
+/// The people list: me first, then the authors of PRs I'm reviewing, each with
+/// red/green/grey PR tallies.
+fn render_pr_people(app: &AppState, frame: &mut Frame, area: Rect, focused: bool) {
+    let p = &app.palette;
+    let header_style = if focused {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+    };
+    let mut title = String::from(" PRs");
+    if app.control.pr_status_loading {
+        title.push_str(" · updating…");
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(title, header_style))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height <= CONTROL_HEADER_ROWS {
+        return;
+    }
+    let body = Rect::new(
+        area.x,
+        area.y + CONTROL_HEADER_ROWS,
+        area.width,
+        area.height - CONTROL_HEADER_ROWS,
+    );
+    let dim = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+
+    let Some(snapshot) = app.control.pr_status.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" loading…", dim))),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        return;
+    };
+    if snapshot.people.is_empty() {
+        if snapshot.errors.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(" no open PRs", dim))),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+        } else {
+            // Surface the actual gh error(s) so a persistent failure is diagnosable.
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(" fetch failed:", dim))),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+            let avail = body.width.saturating_sub(1) as usize;
+            for (i, err) in snapshot
+                .errors
+                .iter()
+                .take(body.height.saturating_sub(1) as usize)
+                .enumerate()
+            {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(" {}", truncate(err, avail)),
+                        Style::default().fg(p.red),
+                    ))),
+                    Rect::new(body.x, body.y + 1 + i as u16, body.width, 1),
+                );
+            }
+        }
+        return;
+    }
+
+    let reserve_footer = focused && body.height >= 2;
+    let list_rows = body.height as usize - usize::from(reserve_footer);
+    let selected = app
+        .control
+        .selected_person
+        .min(snapshot.people.len().saturating_sub(1));
+    let scroll = scroll_to_keep_visible(0, selected, list_rows.max(1));
+    for (idx, person) in snapshot.people.iter().enumerate().skip(scroll) {
+        let row = idx - scroll;
+        if row >= list_rows {
+            break;
+        }
+        let y = body.y + row as u16;
+        let is_selected = idx == selected;
+        if is_selected {
+            let bg = if focused { p.surface0 } else { p.surface_dim };
+            let buf = frame.buffer_mut();
+            for x in body.x..body.x + body.width {
+                buf[(x, y)].set_style(Style::default().bg(bg));
+            }
+        }
+        let name = if person.is_me {
+            format!("{} (you)", person.login)
+        } else {
+            person.login.clone()
+        };
+        let name_style = if is_selected {
+            Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
+        };
+        let marker = if is_selected { "▸ " } else { "  " };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(p.accent)),
+            Span::styled(
+                truncate(&name, body.width.saturating_sub(12) as usize),
+                name_style,
+            ),
+        ];
+        if person.red > 0 {
+            spans.push(Span::styled(
+                format!("  {}", person.red),
+                Style::default().fg(p.red).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if person.green > 0 {
+            spans.push(Span::styled(
+                format!("  {}", person.green),
+                Style::default().fg(p.green),
+            ));
+        }
+        if person.grey > 0 {
+            spans.push(Span::styled(format!("  {}", person.grey), dim));
+        }
+        if person.ci > 0 {
+            // Separated from red/green/grey — CI failure is an independent axis.
+            spans.push(Span::styled("  · ", dim));
+            spans.push(Span::styled(
+                format!("{}", person.ci),
+                Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(if is_selected {
+                Style::default().bg(if focused { p.surface0 } else { p.surface_dim })
+            } else {
+                Style::default()
+            }),
+            Rect::new(body.x, y, body.width, 1),
+        );
+    }
+
+    if reserve_footer {
+        render_pr_footer(app, frame, area, " ↵ person · p pr#");
+    }
+}
+
+/// One person's PRs as a Graphite stack tree, honouring the green/grey toggles.
+fn render_pr_person(app: &AppState, frame: &mut Frame, area: Rect, focused: bool, login: &str) {
+    let p = &app.palette;
+    let header_style = if focused {
+        Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD)
+    };
+    let toggles = format!(
+        " · {} green · {} grey",
+        if app.control.pr_show_green { "✓" } else { "·" },
+        if app.control.pr_show_grey { "✓" } else { "·" },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" PRs · {login}"), header_style),
+            Span::styled(toggles, Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+        ])),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height <= CONTROL_HEADER_ROWS {
+        return;
+    }
+    let body = Rect::new(
+        area.x,
+        area.y + CONTROL_HEADER_ROWS,
+        area.width,
+        area.height - CONTROL_HEADER_ROWS,
+    );
+    let dim = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+
+    let rows = match app.control.pr_status.as_ref() {
+        Some(snapshot) => {
+            snapshot.visible_person_rows(login, app.control.pr_show_green, app.control.pr_show_grey)
+        }
+        None => Vec::new(),
+    };
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(" no PRs in view", dim))),
+            Rect::new(body.x, body.y, body.width, 1),
+        );
+        if focused && body.height >= 2 {
+            render_pr_footer(app, frame, area, " l green · o grey · q back");
+        }
+        return;
+    }
+
+    // Interleave a repo-title line before each repo's PRs. The selection
+    // (`selected_person_pr`) indexes PR rows only — titles aren't selectable.
+    enum Item<'a> {
+        Title(String),
+        Pr {
+            pr_index: usize,
+            prefix: &'a str,
+            person_pr: &'a crate::workspace::PersonPr,
+        },
+    }
+    let mut items: Vec<Item> = Vec::new();
+    let mut last_repo: Option<&str> = None;
+    for (pr_index, (prefix, person_pr)) in rows.iter().enumerate() {
+        let repo_key = person_pr.pr.repo_key.as_str();
+        if last_repo != Some(repo_key) {
+            last_repo = Some(repo_key);
+            let label = app
+                .control
+                .repos
+                .iter()
+                .find(|repo| repo.key == repo_key)
+                .map(|repo| repo.label.clone())
+                .unwrap_or_else(|| repo_key.to_string());
+            items.push(Item::Title(label));
+        }
+        items.push(Item::Pr {
+            pr_index,
+            prefix: prefix.as_str(),
+            person_pr,
+        });
+    }
+
+    let reserve_footer = focused && body.height >= 2;
+    let list_rows = (body.height as usize).saturating_sub(usize::from(reserve_footer));
+    let selected = app
+        .control
+        .selected_person_pr
+        .min(rows.len().saturating_sub(1));
+    let selected_line = items
+        .iter()
+        .position(|item| matches!(item, Item::Pr { pr_index, .. } if *pr_index == selected))
+        .unwrap_or(0);
+    let scroll = scroll_to_keep_visible(0, selected_line, list_rows.max(1));
+    for (line, item) in items.iter().enumerate().skip(scroll) {
+        let row = line - scroll;
+        if row >= list_rows {
+            break;
+        }
+        let y = body.y + row as u16;
+        match item {
+            Item::Title(label) => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(" {label}"),
+                        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                    ))),
+                    Rect::new(body.x, y, body.width, 1),
+                );
+            }
+            Item::Pr {
+                pr_index,
+                prefix,
+                person_pr,
+            } => {
+                let is_selected = *pr_index == selected;
+                if is_selected {
+                    let bg = if focused { p.surface0 } else { p.surface_dim };
+                    let buf = frame.buffer_mut();
+                    for x in body.x..body.x + body.width {
+                        buf[(x, y)].set_style(Style::default().bg(bg));
+                    }
+                }
+                let pr = &person_pr.pr;
+                let number = format!("#{} ", pr.number);
+                let label_style = if is_selected {
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(p.subtext0)
+                };
+                // CI failure paints the number yellow (independent of bucket);
+                // otherwise it takes the bucket colour (red/green/grey).
+                let number_color = if pr.ci_failing {
+                    p.yellow
+                } else {
+                    bucket_color(person_pr.bucket, p)
+                };
+                let title_avail = (body.width as usize)
+                    .saturating_sub(prefix.chars().count() + 1 + number.chars().count() + 1);
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(format!(" {prefix}"), Style::default().fg(p.overlay0)),
+                        Span::styled(
+                            number,
+                            Style::default().fg(number_color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(truncate(&pr.title, title_avail), label_style),
+                    ]))
+                    .style(if is_selected {
+                        Style::default().bg(if focused { p.surface0 } else { p.surface_dim })
+                    } else {
+                        Style::default()
+                    }),
+                    Rect::new(body.x, y, body.width, 1),
+                );
+            }
+        }
+    }
+
+    if reserve_footer {
+        render_pr_footer(app, frame, area, " l green · o grey · ↵ review · p pr# · q back");
+    }
+}
+
+/// Footer for the PR pane: the `p` PR-number jump input while collecting digits,
+/// otherwise the supplied key hints.
+fn render_pr_footer(app: &AppState, frame: &mut Frame, area: Rect, hints: &str) {
+    let p = &app.palette;
+    let footer_y = area.y + area.height.saturating_sub(1);
+    if let Some(digits) = &app.control.pr_number_jump {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " go to PR #",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{digits}▏"),
+                    Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  ↵ open · esc cancel",
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ])),
+            Rect::new(area.x, footer_y, area.width, 1),
+        );
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hints,
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ))),
+        Rect::new(area.x, footer_y, area.width, 1),
+    );
 }
 
 /// Top half while reviewing: a branch picker for the repository under review.
@@ -278,11 +640,7 @@ fn render_review_half(app: &AppState, frame: &mut Frame, area: Rect) {
         );
         return;
     }
-    let footer = if prs_shown {
-        " space open · c checkout · o branches · O pr# · esc back"
-    } else {
-        " space open · c checkout · alt+p pr · / filter · o prs · O pr# · esc back"
-    };
+    let footer = " ↵ create · c checkout · p pr# · alt+w review · / filter · esc back";
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             footer,
@@ -375,6 +733,11 @@ fn render_review_pr_rows(
 /// the selected agent is highlighted when the Agents pane has focus.
 fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height < 2 {
+        return;
+    }
+    // Behind `n`, the Agents pane becomes the repository picker.
+    if app.control.agents_view == AgentsPaneView::Repos {
+        render_repos_view(app, frame, area);
         return;
     }
     let p = &app.palette;
@@ -520,12 +883,14 @@ pub(super) fn render_confirm_kill_overlay(app: &AppState, frame: &mut Frame, are
     );
 }
 
-fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {
+/// The repository picker shown inside the Agents pane behind `n`. `Enter` opens
+/// the create-agent branch picker; `t` opens a terminal; `q`/focus-out returns.
+fn render_repos_view(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let p = &app.palette;
-    let focused = app.control.focus == FocusPane::Control;
+    let focused = app.control.focus == FocusPane::Agents;
 
     let header_style = if focused {
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
@@ -607,7 +972,7 @@ fn render_control_half(app: &AppState, frame: &mut Frame, area: Rect) {
         let hint_y = area.y + area.height.saturating_sub(1);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " space new · t term",
+                " ↵ new · t term · q back",
                 Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
             ))),
             Rect::new(area.x, hint_y, area.width, 1),

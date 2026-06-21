@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
-use crate::workspace::{GitStatusCacheEntry, WorkspaceGitStatus};
+use crate::workspace::{GitStatusCacheEntry, PrStatusSnapshot, WorkspaceGitStatus};
 
 #[derive(Debug)]
 pub struct WorktreeAddResult {
@@ -130,4 +130,6 @@ pub enum AppEvent {
     WorktreeRemoveFinished(WorktreeRemoveResult),
     /// Background `git fetch origin <base>` ahead of a PR review row completed.
     ReviewBaseFetchFinished(ReviewBaseFetchResult),
+    /// Background PR-status refresh completed (the PR pane's per-person snapshot).
+    PrStatusRefreshed { snapshot: PrStatusSnapshot },
 }

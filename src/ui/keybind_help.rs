@@ -30,35 +30,63 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             "focus",
             vec![
                 help_entry("alt+h / alt+l", "left column / Main pane"),
-                help_entry("alt+k / alt+j", "Control half / Agents half"),
+                help_entry("alt+k / alt+j", "PR pane / Agents pane"),
                 help_entry("alt+1..9", "focus agent 1-9"),
             ],
         ),
         (
-            "selection",
+            "PR pane",
             vec![
-                help_entry("↑ / ↓  ·  j / k", "move selection in the focused list"),
-                help_entry("enter", "activate selection (focus stays put)"),
-                help_entry("esc", "back / cancel"),
+                help_entry("↑↓ · j / k", "move selection"),
+                help_entry("enter / space", "open person · enter a PR as reviewer"),
+                help_entry("l / o", "toggle green (lgtm'd) / grey PRs"),
+                help_entry("p", "open an agent by PR number"),
+                help_entry("alt+w", "open the PR in Reviewable (Chrome)"),
+                help_entry("q", "back to the people list"),
+            ],
+        ),
+        (
+            "agents pane",
+            vec![
+                help_entry("enter", "focus the selected agent in Main"),
+                help_entry("n", "repo picker (q / focus-out returns)"),
+                help_entry("alt+r / alt+x", "rename / kill the selected agent"),
+                help_entry("alt+p", "submit a PR for the agent's branch"),
+            ],
+        ),
+        (
+            "repo / branch picker",
+            vec![
+                help_entry("enter / alt+enter", "agent on the branch / on a new branch"),
+                help_entry("t", "terminal in the selected repo"),
+                help_entry("p", "open an agent by PR number"),
+                help_entry("alt+w", "open the branch's PR in Reviewable"),
+                help_entry("/", "filter branches"),
+            ],
+        ),
+        (
+            "Main pane",
+            vec![
+                help_entry("alt+r / alt+t", "toggle the review / terminal row"),
+                help_entry("alt+g", "fix CLAUDE: comments in the review diff"),
+                help_entry("alt+z", "zoom the focused row"),
             ],
         ),
         (
             "commands",
             vec![
-                help_entry("alt+n", "new agent on the selected repo"),
-                help_entry("alt+r", "review repo (Control) · rename agent (Agents)"),
-                help_entry("alt+x", "kill the selected agent"),
-                help_entry("alt+p", "submit a PR for the agent/branch"),
-                help_entry("alt+t", "open a terminal in the selected repo"),
                 help_entry("alt+s", "copy mode (keyboard scrollback + yank)"),
                 help_entry("alt+,", "settings"),
                 help_entry("alt+?", "this keybind help"),
-                help_entry("alt+q", "quit"),
+                help_entry("alt+q", "quit herdr"),
             ],
         ),
         (
             "agent pane (reserved, sent to the agent)",
-            vec![help_entry("ctrl+c / d / z / l / a / e / u / w / r", "passed through to the focused agent")],
+            vec![help_entry(
+                "ctrl+c / d / z / l / a / e / u / w / r",
+                "passed through to the focused agent",
+            )],
         ),
     ];
 

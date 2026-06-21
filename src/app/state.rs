@@ -791,14 +791,15 @@ pub enum AgentPanelScope {
 
 /// Which of the three keyboard-first panes currently has focus.
 ///
-/// Layout: Control (top-left) and Agents (bottom-left) make up the left column;
-/// Main (right) shows the focused agent's pane or the review tool.
+/// Layout: the PR pane (top-left) and Agents (bottom-left) make up the left
+/// column; Main (right) shows the focused agent's pane or the review tool.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FocusPane {
-    /// Repository list / review picker (top-left).
+    /// PR-status pane (top-left). Also hosts the create-agent branch picker
+    /// while in [`Mode::Review`].
     #[default]
-    Control,
-    /// Running agents (bottom-left).
+    Prs,
+    /// Running agents — or, behind `n`, the repository picker (bottom-left).
     Agents,
     /// Active agent pane or review tool (right).
     Main,
@@ -809,8 +810,28 @@ pub enum FocusPane {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LeftHalf {
     #[default]
-    Control,
+    Prs,
     Agents,
+}
+
+/// Which view the PR pane (top-left) is showing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PrPaneView {
+    /// The per-person summary list (default).
+    #[default]
+    People,
+    /// One person's PRs, drilled in from the people list.
+    Person { login: String },
+}
+
+/// Which view the Agents pane (bottom-left) is showing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentsPaneView {
+    /// The running-agents list (default).
+    #[default]
+    Agents,
+    /// The repository picker, toggled in with `n`; `q`/focus-out returns.
+    Repos,
 }
 
 /// Which list the branch picker shows; `o` toggles between them.
@@ -1043,6 +1064,25 @@ pub struct ControlState {
     /// Rendered as a loading box in the toast slot; the fetch-finished
     /// handler clears it and opens the row.
     pub review_base_fetch: Option<ReviewBaseFetchState>,
+    /// Latest PR-status snapshot for the PR pane (`None` until the first
+    /// background fetch returns).
+    pub pr_status: Option<crate::workspace::PrStatusSnapshot>,
+    /// Whether a PR-status fetch is in flight (drives the pane's "updating" hint).
+    pub pr_status_loading: bool,
+    /// PR pane view: the per-person summary, or one person drilled in.
+    pub pr_view: PrPaneView,
+    /// PR pane: show GREEN (lgtm'd) PRs in a person's list (`l` toggles).
+    pub pr_show_green: bool,
+    /// PR pane: show GREY (waiting-on-other-side) PRs (`o` toggles).
+    pub pr_show_grey: bool,
+    /// Selected row in the PR pane's person list.
+    pub selected_person: usize,
+    /// Selected row in the PR pane's per-person PR list.
+    pub selected_person_pr: usize,
+    /// `Some(digits)` while `p` collects a PR number to create/activate an agent.
+    pub pr_number_jump: Option<String>,
+    /// Agents pane view: the agents list, or the repo picker (`n` toggles).
+    pub agents_view: AgentsPaneView,
 }
 
 /// A background fetch of a PR's base and head branches from origin (followed
@@ -1664,14 +1704,14 @@ impl AppState {
     }
 
     /// While the branch picker ([`Mode::Review`]) is open, decide whether a key
-    /// is the picker's own. The picker lives in the Control half, so it owns keys
-    /// only while that half is focused — and never the focus-navigation chord
+    /// is the picker's own. The picker lives in the PR-pane (top-left) half, so
+    /// it owns keys only while that half is focused — and never the focus-nav chord
     /// alt+h/j/k/l, which moves pane focus (possibly to Main/Agents) so you can
     /// step away to read the diff and back without closing the picker. Anything
     /// the picker doesn't own flows through the home key handler instead.
     pub(crate) fn review_picker_owns_key(&self, key: crossterm::event::KeyEvent) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
-        if self.control.focus != FocusPane::Control {
+        if self.control.focus != FocusPane::Prs {
             return false;
         }
         let is_focus_nav = key.modifiers.contains(KeyModifiers::ALT)

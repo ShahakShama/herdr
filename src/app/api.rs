@@ -56,6 +56,43 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrStatusRefreshed { snapshot } = ev {
+            self.pr_status_refresh_in_flight = false;
+            self.last_pr_status_refresh = Instant::now();
+            self.state.control.pr_status_loading = false;
+            // A refresh that came back empty *because it errored* keeps the
+            // previous snapshot's people rather than wiping the pane to a
+            // "fetch failed" state; only the error list is updated.
+            let total_failure = snapshot.people.is_empty() && !snapshot.errors.is_empty();
+            let had_people = self
+                .state
+                .control
+                .pr_status
+                .as_ref()
+                .is_some_and(|old| !old.people.is_empty());
+            if total_failure && had_people {
+                if let Some(old) = self.state.control.pr_status.as_mut() {
+                    old.errors = snapshot.errors;
+                }
+                return;
+            }
+            // Only redraw when the meaningful content changed (the timestamp
+            // always differs), mirroring the git-status refresh.
+            let changed = self
+                .state
+                .control
+                .pr_status
+                .as_ref()
+                .map(|old| old.people != snapshot.people || old.errors != snapshot.errors)
+                .unwrap_or(true);
+            self.state.control.pr_status = Some(snapshot);
+            if changed {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(result);
             return;

@@ -7,7 +7,9 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::app::state::{AppState, FocusPane, LeftHalf, Mode, ReviewState};
+use crate::app::state::{
+    AgentsPaneView, AppState, FocusPane, LeftHalf, Mode, PrPaneView, ReviewState,
+};
 use crate::app::App;
 use crate::input::TerminalKey;
 
@@ -47,16 +49,30 @@ impl App {
             return false;
         }
 
-        // `p` (plain in the agents pane, or alt+p anywhere) submits a PR for the
-        // focused agent's branch; this runs `gh`, so it happens at the App level.
-        if event.code == KeyCode::Char('p') && self.state.control.focus == FocusPane::Agents {
+        // The PR pane owns its own keys when focused (person/PR nav, the
+        // green/grey toggles, Enter → reviewer mode, the `p` PR-number jump);
+        // these need App-level access (gh, worktree creation), so they run here.
+        if self.state.mode == Mode::Home
+            && self.state.control.focus == FocusPane::Prs
+            && self.handle_pr_pane_key(event)
+        {
+            return false;
+        }
+
+        // `p` in the agents list submits a PR for the focused agent's branch.
+        if event.code == KeyCode::Char('p')
+            && self.state.control.focus == FocusPane::Agents
+            && self.state.control.agents_view == AgentsPaneView::Agents
+        {
             self.submit_pr_for_selected_agent();
             return false;
         }
 
-        // `t` in the Control pane opens a plain terminal in the selected repo.
-        // This spawns a shell, so it runs at the App level.
-        if event.code == KeyCode::Char('t') && self.state.control.focus == FocusPane::Control {
+        // `t` in the repo picker opens a plain terminal in the selected repo.
+        if event.code == KeyCode::Char('t')
+            && self.state.control.focus == FocusPane::Agents
+            && self.state.control.agents_view == AgentsPaneView::Repos
+        {
             self.open_terminal_in_selected_repo();
             return false;
         }
@@ -128,6 +144,74 @@ impl App {
         }
         // Unconsumed keys with Main focused are typed into the agent pane.
         self.state.control.focus == FocusPane::Main
+    }
+
+    /// Handle a key while the PR pane (top-left) is focused in `Mode::Home`.
+    /// Returns `true` when consumed; `false` for focus-nav/global chords (alt+*)
+    /// and unhandled keys, so they flow on to [`AppState::apply_home_key`].
+    fn handle_pr_pane_key(&mut self, event: crossterm::event::KeyEvent) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        // The `p` PR-number jump owns keys while collecting digits.
+        if self.state.control.pr_number_jump.is_some() {
+            match event.code {
+                KeyCode::Esc => self.state.control.pr_number_jump = None,
+                KeyCode::Backspace => {
+                    if let Some(digits) = self.state.control.pr_number_jump.as_mut() {
+                        digits.pop();
+                    }
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    if let Some(digits) = self.state.control.pr_number_jump.as_mut() {
+                        digits.push(c);
+                    }
+                }
+                KeyCode::Enter => self.submit_pr_number_jump(),
+                _ => {}
+            }
+            return true;
+        }
+        let plain = !event.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+        if event.modifiers.contains(KeyModifiers::ALT) {
+            // alt+w opens the selected PR in Reviewable (Person view only); other
+            // alt chords (focus-nav, quit, …) fall through to apply_home_key.
+            if event.code == KeyCode::Char('w')
+                && matches!(self.state.control.pr_view, PrPaneView::Person { .. })
+            {
+                self.open_selected_pr_in_reviewable();
+                return true;
+            }
+            return false;
+        }
+        match &self.state.control.pr_view {
+            PrPaneView::People => match event.code {
+                KeyCode::Up => self.state.pr_people_move(-1),
+                KeyCode::Down => self.state.pr_people_move(1),
+                KeyCode::Char('k') if plain => self.state.pr_people_move(-1),
+                KeyCode::Char('j') if plain => self.state.pr_people_move(1),
+                KeyCode::Char('h') | KeyCode::Char('l') if plain => {}
+                KeyCode::Enter | KeyCode::Char(' ') => self.state.pr_open_selected_person(),
+                KeyCode::Char('p') if plain => {
+                    self.state.control.pr_number_jump = Some(String::new());
+                }
+                _ => return false,
+            },
+            PrPaneView::Person { .. } => match event.code {
+                KeyCode::Up => self.state.pr_person_move(-1),
+                KeyCode::Down => self.state.pr_person_move(1),
+                KeyCode::Char('k') if plain => self.state.pr_person_move(-1),
+                KeyCode::Char('j') if plain => self.state.pr_person_move(1),
+                KeyCode::Char('h') if plain => {}
+                KeyCode::Char('l') if plain => self.state.pr_toggle_green(),
+                KeyCode::Char('o') if plain => self.state.pr_toggle_grey(),
+                KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_person_pr_for_review(),
+                KeyCode::Char('q') if plain => self.state.pr_back_to_people(),
+                KeyCode::Char('p') if plain => {
+                    self.state.control.pr_number_jump = Some(String::new());
+                }
+                _ => return false,
+            },
+        }
+        true
     }
 
     /// Whether vim/nvim is the foreground program in the focused Main pane.
@@ -343,35 +427,55 @@ impl AppState {
             // Directional pane focus — alt so it also works while typing in Main.
             KeyCode::Char('h') if alt => self.home_focus_left(),
             KeyCode::Char('j') if alt => self.set_home_focus(FocusPane::Agents),
-            KeyCode::Char('k') if alt => self.set_home_focus(FocusPane::Control),
+            KeyCode::Char('k') if alt => self.set_home_focus(FocusPane::Prs),
             KeyCode::Char('l') if alt => self.set_home_focus(FocusPane::Main),
 
-            // Commands.
-            KeyCode::Char('q') if cmd => self.mode = Mode::ConfirmQuit,
+            // Commands. Only alt+q quits herdr; plain `q` is a context "back"
+            // key (handled per-pane below / in the PR pane handler).
+            KeyCode::Char('q') if alt => self.mode = Mode::ConfirmQuit,
             KeyCode::Char(',') if cmd => self.mode = Mode::Settings,
             KeyCode::Char('?') if cmd => self.mode = Mode::KeybindHelp,
-            // `r` renames the selected agent in the Agents pane. (Review now
-            // lives only behind alt+r in Main, handled at the App level.)
-            KeyCode::Char('r') if cmd && self.control.focus == FocusPane::Agents => {
+            // `n` toggles the Agents pane's repo picker (and back).
+            KeyCode::Char('n') if cmd && self.control.focus == FocusPane::Agents => {
+                self.toggle_agents_view();
+            }
+            // Plain `q` in the repo picker returns to the agents list.
+            KeyCode::Char('q')
+                if self.control.focus == FocusPane::Agents
+                    && self.control.agents_view == AgentsPaneView::Repos =>
+            {
+                self.control.agents_view = AgentsPaneView::Agents;
+            }
+            // `r` renames the selected agent (agents list only).
+            KeyCode::Char('r')
+                if cmd
+                    && self.control.focus == FocusPane::Agents
+                    && self.control.agents_view == AgentsPaneView::Agents =>
+            {
                 self.request_home_rename_agent();
             }
-            KeyCode::Char('x') if cmd => self.request_home_kill_agent(),
+            // `x` kills the marked agent — but not while the repo picker is up.
+            KeyCode::Char('x')
+                if cmd
+                    && !(self.control.focus == FocusPane::Agents
+                        && self.control.agents_view == AgentsPaneView::Repos) =>
+            {
+                self.request_home_kill_agent();
+            }
             KeyCode::Char('p') if cmd => self.request_home_submit_pr(),
             KeyCode::Char(c) if cmd && c.is_ascii_digit() && c != '0' => {
                 self.home_jump_to_agent((c as u8 - b'1') as usize);
             }
 
-            // Selection/activation only in a list pane; with Main focused these
-            // fall through to the agent pane.
+            // Selection/activation in the Agents pane (the PR pane handles its
+            // own keys at the App level). With Main focused these fall through to
+            // the agent pane.
             KeyCode::Up if in_list => self.home_move_selection(-1),
             KeyCode::Down if in_list => self.home_move_selection(1),
-            // Space mirrors Enter in the list panes: open the branch picker in
-            // the repos (Control) list, or jump into the selected agent.
             KeyCode::Enter | KeyCode::Char(' ') if in_list => self.home_activate(),
 
-            // Vim-style navigation in the list panes: hjkl mirror the arrow keys.
-            // The lists are vertical, so h/l are inert just like Left/Right.
-            // (alt+h/j/k/l moved focus above, so these are the plain presses.)
+            // Vim-style navigation in the list panes: j/k mirror the arrows;
+            // h/l are inert (vertical lists). alt+h/j/k/l moved focus above.
             KeyCode::Char('k') if in_list => self.home_move_selection(-1),
             KeyCode::Char('j') if in_list => self.home_move_selection(1),
             KeyCode::Char('h') | KeyCode::Char('l') if in_list => {}
@@ -382,12 +486,32 @@ impl AppState {
     }
 
     fn set_home_focus(&mut self, focus: FocusPane) {
+        // Leaving the Agents pane collapses its repo picker back to the list
+        // (req 1: focus out of the repos view returns to the agents list).
+        if focus != FocusPane::Agents
+            && self.control.focus == FocusPane::Agents
+            && self.control.agents_view == AgentsPaneView::Repos
+        {
+            self.control.agents_view = AgentsPaneView::Agents;
+        }
+        // Leaving the PR pane returns it to the people list (it goes back to the
+        // persons display when it becomes inactive).
+        if focus != FocusPane::Prs && self.control.focus == FocusPane::Prs {
+            self.control.pr_view = PrPaneView::People;
+        }
         self.control.focus = focus;
         match focus {
-            FocusPane::Control => self.control.last_left = LeftHalf::Control,
+            FocusPane::Prs => self.control.last_left = LeftHalf::Prs,
             FocusPane::Agents => self.control.last_left = LeftHalf::Agents,
             FocusPane::Main => {}
         }
+    }
+
+    fn toggle_agents_view(&mut self) {
+        self.control.agents_view = match self.control.agents_view {
+            AgentsPaneView::Agents => AgentsPaneView::Repos,
+            AgentsPaneView::Repos => AgentsPaneView::Agents,
+        };
     }
 
     /// Move focus to the neighbouring stacked row (review/terminal/agent) of the
@@ -430,10 +554,10 @@ impl AppState {
 
     pub(crate) fn home_focus_left(&mut self) {
         let target = match self.control.last_left {
-            LeftHalf::Control => FocusPane::Control,
+            LeftHalf::Prs => FocusPane::Prs,
             LeftHalf::Agents => FocusPane::Agents,
         };
-        self.control.focus = target;
+        self.set_home_focus(target);
     }
 
     fn home_agent_count(&self) -> usize {
@@ -458,32 +582,37 @@ impl AppState {
     }
 
     fn home_move_selection(&mut self, delta: isize) {
-        match self.control.focus {
-            FocusPane::Control => {
+        // The PR pane handles its own selection at the App level; this serves
+        // the Agents pane (agents list, or the repo picker behind `n`).
+        if self.control.focus != FocusPane::Agents {
+            return;
+        }
+        match self.control.agents_view {
+            AgentsPaneView::Repos => {
                 let len = self.control.repos.len();
                 self.control.selected_repo = step_index(self.control.selected_repo, delta, len);
             }
-            FocusPane::Agents => {
+            AgentsPaneView::Agents => {
                 let len = self.home_agent_count();
                 self.control.selected_agent = step_index(self.control.selected_agent, delta, len);
             }
-            FocusPane::Main => {}
         }
     }
 
-    /// Enter: activate the current selection. In the Agents pane this also moves
-    /// focus into Main, so Enter drops you straight into the selected agent.
+    /// Enter in the Agents pane: open the branch picker on the selected repo
+    /// (repo picker), or jump into the selected agent and focus Main.
     fn home_activate(&mut self) {
-        match self.control.focus {
-            FocusPane::Agents => {
+        if self.control.focus != FocusPane::Agents {
+            return;
+        }
+        match self.control.agents_view {
+            AgentsPaneView::Repos => self.open_create_agent_branch_picker(),
+            AgentsPaneView::Agents => {
                 self.home_focus_selected_agent_workspace();
                 if self.active.is_some() {
                     self.set_home_focus(FocusPane::Main);
                 }
             }
-            // Enter on a repo opens the Graphite branch picker to create an agent.
-            FocusPane::Control => self.open_create_agent_branch_picker(),
-            FocusPane::Main => {}
         }
     }
 
@@ -511,6 +640,93 @@ impl AppState {
         }
     }
 
+    // --- PR pane (top-left) selection + view state -------------------------
+
+    fn pr_people_len(&self) -> usize {
+        self.control.pr_status.as_ref().map_or(0, |s| s.people.len())
+    }
+
+    pub(crate) fn pr_people_move(&mut self, delta: isize) {
+        let len = self.pr_people_len();
+        self.control.selected_person = step_index(self.control.selected_person, delta, len);
+    }
+
+    /// Number of PR rows visible in the current Person view (after l/o toggles).
+    fn pr_visible_person_row_count(&self) -> usize {
+        match (&self.control.pr_view, self.control.pr_status.as_ref()) {
+            (PrPaneView::Person { login }, Some(snapshot)) => snapshot
+                .visible_person_rows(login, self.control.pr_show_green, self.control.pr_show_grey)
+                .len(),
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn pr_person_move(&mut self, delta: isize) {
+        let len = self.pr_visible_person_row_count();
+        self.control.selected_person_pr = step_index(self.control.selected_person_pr, delta, len);
+    }
+
+    /// The login the people list currently points at.
+    pub(crate) fn selected_person_login(&self) -> Option<String> {
+        let snapshot = self.control.pr_status.as_ref()?;
+        let idx = self
+            .control
+            .selected_person
+            .min(snapshot.people.len().saturating_sub(1));
+        snapshot.people.get(idx).map(|person| person.login.clone())
+    }
+
+    /// Drill into the selected person's PRs (req 7).
+    pub(crate) fn pr_open_selected_person(&mut self) {
+        if let Some(login) = self.selected_person_login() {
+            self.control.pr_view = PrPaneView::Person { login };
+            self.control.selected_person_pr = 0;
+            // Start each person view showing only the RED (waiting-for-me) PRs;
+            // `l`/`o` then reveal the green/grey ones.
+            self.control.pr_show_green = false;
+            self.control.pr_show_grey = false;
+        }
+    }
+
+    /// Back to the people list (req 8).
+    pub(crate) fn pr_back_to_people(&mut self) {
+        self.control.pr_view = PrPaneView::People;
+    }
+
+    pub(crate) fn pr_toggle_green(&mut self) {
+        self.control.pr_show_green = !self.control.pr_show_green;
+        self.clamp_selected_person_pr();
+    }
+
+    pub(crate) fn pr_toggle_grey(&mut self) {
+        self.control.pr_show_grey = !self.control.pr_show_grey;
+        self.clamp_selected_person_pr();
+    }
+
+    fn clamp_selected_person_pr(&mut self) {
+        let len = self.pr_visible_person_row_count();
+        self.control.selected_person_pr =
+            self.control.selected_person_pr.min(len.saturating_sub(1));
+    }
+
+    /// The PR the Person view currently points at (the selected visible row).
+    pub(crate) fn selected_person_pr(&self) -> Option<crate::workspace::PersonPr> {
+        let PrPaneView::Person { login } = &self.control.pr_view else {
+            return None;
+        };
+        let snapshot = self.control.pr_status.as_ref()?;
+        let rows = snapshot.visible_person_rows(
+            login,
+            self.control.pr_show_green,
+            self.control.pr_show_grey,
+        );
+        let idx = self
+            .control
+            .selected_person_pr
+            .min(rows.len().saturating_sub(1));
+        rows.get(idx).map(|(_, person_pr)| person_pr.clone())
+    }
+
     // --- command stubs wired in later phases -------------------------------
 
     /// Open the Graphite branch picker for the selected repository. This is the
@@ -520,6 +736,9 @@ impl AppState {
             let branches = crate::workspace::list_review_branches(&repo.root);
             self.control.review = Some(ReviewState::new(repo, branches));
             self.mode = Mode::Review;
+            // The picker renders in the top-left (PR-pane slot); focus it so it
+            // owns keys. agents_view stays Repos so Esc returns to the picker.
+            self.control.focus = FocusPane::Prs;
         }
     }
 
@@ -639,8 +858,8 @@ impl AppState {
         let count = crate::ui::agent_panel_entries_all(self).len();
         if count == 0 {
             self.control.selected_agent = 0;
-            self.control.focus = FocusPane::Control;
-            self.control.last_left = LeftHalf::Control;
+            self.control.focus = FocusPane::Prs;
+            self.control.last_left = LeftHalf::Prs;
         } else if self.control.selected_agent >= count {
             self.control.selected_agent = count - 1;
         }
@@ -707,7 +926,7 @@ mod tests {
     #[test]
     fn directional_focus_moves_between_panes() {
         let mut state = AppState::test_new();
-        assert_eq!(state.control.focus, FocusPane::Control);
+        assert_eq!(state.control.focus, FocusPane::Prs);
 
         assert!(state.apply_home_key(alt('j')));
         assert_eq!(state.control.focus, FocusPane::Agents);
@@ -720,7 +939,45 @@ mod tests {
         assert_eq!(state.control.focus, FocusPane::Agents);
 
         assert!(state.apply_home_key(alt('k')));
-        assert_eq!(state.control.focus, FocusPane::Control);
+        assert_eq!(state.control.focus, FocusPane::Prs);
+    }
+
+    #[test]
+    fn plain_q_never_quits_only_alt_q_does() {
+        let mut state = AppState::test_new();
+        state.control.focus = FocusPane::Agents;
+        // Plain q must never quit or open the confirm prompt (req 2).
+        state.apply_home_key(plain(KeyCode::Char('q')));
+        assert_eq!(state.mode, Mode::Home);
+        assert!(!state.should_quit);
+        // alt+q still opens the quit confirm.
+        assert!(state.apply_home_key(alt('q')));
+        assert_eq!(state.mode, Mode::ConfirmQuit);
+    }
+
+    #[test]
+    fn n_opens_repo_picker_and_q_returns_to_agents() {
+        let mut state = AppState::test_new();
+        state.control.focus = FocusPane::Agents;
+        assert_eq!(state.control.agents_view, AgentsPaneView::Agents);
+        // `n` switches the Agents pane to the repo picker (req 1).
+        assert!(state.apply_home_key(alt('n')));
+        assert_eq!(state.control.agents_view, AgentsPaneView::Repos);
+        // `q` returns to the agents list.
+        assert!(state.apply_home_key(plain(KeyCode::Char('q'))));
+        assert_eq!(state.control.agents_view, AgentsPaneView::Agents);
+    }
+
+    #[test]
+    fn focus_out_of_repo_picker_returns_to_agents_list() {
+        let mut state = AppState::test_new();
+        state.control.focus = FocusPane::Agents;
+        state.apply_home_key(alt('n'));
+        assert_eq!(state.control.agents_view, AgentsPaneView::Repos);
+        // Focusing another pane collapses the repo picker back to the list (req 1).
+        assert!(state.apply_home_key(alt('k')));
+        assert_eq!(state.control.focus, FocusPane::Prs);
+        assert_eq!(state.control.agents_view, AgentsPaneView::Agents);
     }
 
     #[test]
@@ -738,7 +995,8 @@ mod tests {
                 label: "b".into(),
             },
         ];
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Agents;
+        state.control.agents_view = AgentsPaneView::Repos;
 
         state.apply_home_key(plain(KeyCode::Up));
         assert_eq!(state.control.selected_repo, 0);
@@ -779,7 +1037,8 @@ mod tests {
             root: "/a".into(),
             label: "a".into(),
         }];
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Agents;
+        state.control.agents_view = AgentsPaneView::Repos;
 
         // Enter on a selected repo opens the Graphite branch picker.
         assert!(state.apply_home_key(plain(KeyCode::Enter)));
@@ -796,7 +1055,7 @@ mod tests {
             root: "/a".into(),
             label: "a".into(),
         }];
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Prs;
         // alt+n is no longer bound; it must not open the create form.
         state.apply_home_key(alt('n'));
         assert_eq!(state.mode, Mode::Home);
@@ -860,10 +1119,11 @@ mod tests {
             root: "/a".into(),
             label: "a".into(),
         }];
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Agents;
+        state.control.agents_view = AgentsPaneView::Repos;
 
-        // Enter on a Control repo opens the branch picker (the create-agent
-        // entry point); the picker itself still works for selection/clamping.
+        // Enter on a repo (in the Agents pane's repo picker) opens the branch
+        // picker (the create-agent entry); selection/clamping still works.
         assert!(state.apply_home_key(plain(KeyCode::Enter)));
         assert_eq!(state.mode, Mode::Review);
         assert!(state.control.review.is_some());
@@ -946,40 +1206,29 @@ mod tests {
     }
 
     #[test]
-    fn review_picker_o_toggles_between_branches_and_cached_prs() {
-        use crate::app::state::PickerSource;
+    fn picker_o_is_inert_and_p_opens_pr_number_input() {
         let mut app = app_with_picker(1);
-        // The toggle re-fetches via `gh` each time; with the picker's repo root
-        // pointing at the nonexistent `/a` the fetch fails fast, and the picker
-        // falls back to the previous list — which is what lets this test run
-        // without `gh`, and what keeps the picker usable offline.
-        app.state.control.review.as_mut().unwrap().prs = Some(vec![crate::workspace::ReviewPr {
-            number: 7,
-            title: "Add feature".into(),
-            author: "bob".into(),
-            head_branch: "bob/feature".into(),
-            base_branch: "main".into(),
-            url: "https://github.com/acme/proj/pull/7".into(),
-            graph_prefix: String::new(),
-        }]);
         let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty());
 
-        // `o` switches to the PR list and resets the selection.
+        // `o` no longer toggles a PR list — the PR pane owns PR review now, so
+        // `o` is inert in the branch picker.
         app.handle_review_key(key('o'));
         let review = app.state.control.review.as_ref().unwrap();
-        assert_eq!(review.source, PickerSource::ReviewRequests);
-        assert_eq!(review.selected, 0);
-        assert_eq!(review.visible_len(), 1);
+        assert_eq!(review.source, crate::app::state::PickerSource::Branches);
+        assert!(review.pr_number_input.is_none());
 
-        // Navigation is clamped to the PR list's length, not the branch list's.
-        app.handle_review_key(key('j'));
-        assert_eq!(app.state.control.review.as_ref().unwrap().selected, 0);
-
-        // `o` again returns to the branch list; the picker stays open.
-        app.handle_review_key(key('o'));
-        let review = app.state.control.review.as_ref().unwrap();
-        assert_eq!(review.source, PickerSource::Branches);
-        assert_eq!(app.state.mode, Mode::Review);
+        // `p` opens the PR-number jump input (replacing the old `O`).
+        app.handle_review_key(key('p'));
+        assert_eq!(
+            app.state
+                .control
+                .review
+                .as_ref()
+                .unwrap()
+                .pr_number_input
+                .as_deref(),
+            Some("")
+        );
     }
 
     fn app_with_picker(selected: usize) -> App {
@@ -1054,11 +1303,11 @@ mod tests {
     }
 
     #[test]
-    fn picker_capital_o_collects_a_pr_number_and_esc_returns_to_the_list() {
+    fn picker_p_collects_a_pr_number_and_esc_returns_to_the_list() {
         let mut app = app_with_picker(0);
 
-        // `O` opens the PR-number input.
-        app.handle_review_key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        // `p` opens the PR-number input.
+        app.handle_review_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()));
         assert_eq!(
             app.state
                 .control
@@ -1134,8 +1383,9 @@ mod tests {
             root: "/a".into(),
             label: "a".into(),
         }];
-        assert_eq!(state.control.focus, FocusPane::Control);
-        // Space mirrors Enter in the repos list: it opens the branch picker.
+        state.control.focus = FocusPane::Agents;
+        state.control.agents_view = AgentsPaneView::Repos;
+        // Space mirrors Enter in the repo picker: it opens the branch picker.
         assert!(state.apply_home_key(plain(KeyCode::Char(' '))));
         assert_eq!(state.mode, Mode::Review);
         assert!(state.control.review.is_some());
@@ -1278,7 +1528,7 @@ mod tests {
 
         // In the Control pane, `r` no longer opens the review picker — it is
         // inert there now (review moved to alt+r in Main).
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Prs;
         assert!(!state.apply_home_key(alt('r')));
         assert_eq!(state.mode, Mode::Home);
 
@@ -1319,7 +1569,7 @@ mod tests {
         }];
 
         // Plain `?` in the Control pane fires the command (opens keybind help).
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Prs;
         assert!(state.apply_home_key(plain(KeyCode::Char('?'))));
         assert_eq!(state.mode, Mode::KeybindHelp);
 
@@ -1346,7 +1596,8 @@ mod tests {
                 label: "b".into(),
             },
         ];
-        state.control.focus = FocusPane::Control;
+        state.control.focus = FocusPane::Agents;
+        state.control.agents_view = AgentsPaneView::Repos;
 
         // `j` moves down, `k` moves up — mirroring Down/Up arrows.
         assert!(state.apply_home_key(plain(KeyCode::Char('j'))));
@@ -1463,7 +1714,7 @@ mod tests {
     #[tokio::test]
     async fn scroll_chords_are_noops_when_sidebar_focused() {
         let (mut app, pane_id) = app_with_main_scrollback();
-        app.state.control.focus = FocusPane::Control;
+        app.state.control.focus = FocusPane::Prs;
         assert_eq!(offset_from_bottom(&app, pane_id), 0);
 
         // With a sidebar pane focused these are not scroll chords; the Main
@@ -1578,7 +1829,7 @@ mod tests {
     #[test]
     fn alt_r_is_noop_when_main_not_focused() {
         let (mut app, ws_idx, _agent, review, _tid) = app_with_attached_review();
-        app.state.control.focus = FocusPane::Control;
+        app.state.control.focus = FocusPane::Prs;
         // With Control focused, alt+r does not toggle the review row.
         app.dispatch_home_key(alt('r'));
         assert_eq!(

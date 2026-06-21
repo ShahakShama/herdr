@@ -742,7 +742,7 @@ mod tests {
         // selection following "b-feat" by name even though its index moved —
         // a clamp would have left it on index 0, the current branch.
         assert_eq!(app.state.mode, Mode::Review);
-        assert_eq!(app.state.control.focus, crate::app::state::FocusPane::Control);
+        assert_eq!(app.state.control.focus, crate::app::state::FocusPane::Prs);
         let review = app.state.control.review.as_ref().unwrap();
         assert_eq!(review.branches.len(), 3);
         assert_eq!(review.branches[review.selected].name, "b-feat");
@@ -787,7 +787,7 @@ mod tests {
         });
         app.state.workspaces = vec![ws];
         app.state.mode = Mode::Review;
-        app.state.control.focus = crate::app::state::FocusPane::Control;
+        app.state.control.focus = crate::app::state::FocusPane::Prs;
         app.state.control.review = Some(crate::app::state::ReviewState {
             repo: crate::workspace::Repository {
                 key: "k".into(),

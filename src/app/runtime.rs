@@ -5,6 +5,7 @@ use crossterm::terminal;
 use super::{
     auto_updates_enabled, repeat_key_identity, App, ANIMATION_INTERVAL,
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
+    PR_STATUS_REFRESH_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
 use crate::events::AppEvent;
@@ -255,6 +256,7 @@ impl App {
         changed |= self.clear_due_selection_highlight(now);
 
         self.start_git_status_refresh_if_due(now);
+        self.start_pr_status_refresh_if_due(now);
 
         if self
             .next_auto_update_check
@@ -503,6 +505,35 @@ impl App {
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 
+    /// Kick off a background PR-status refresh when due (one `gh api graphql`
+    /// call per repo, off the UI thread), delivering the snapshot via
+    /// [`AppEvent::PrStatusRefreshed`]. Mirrors [`Self::start_git_status_refresh_if_due`].
+    pub(crate) fn start_pr_status_refresh_if_due(&mut self, now: Instant) {
+        let Some(deadline) = self.pr_status_refresh_deadline() else {
+            return;
+        };
+        if now < deadline {
+            return;
+        }
+        let repos = self.state.control.repos.clone();
+        if repos.is_empty() {
+            self.last_pr_status_refresh = now;
+            return;
+        }
+        self.pr_status_refresh_in_flight = true;
+        self.state.control.pr_status_loading = true;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let snapshot = crate::workspace::fetch_pr_status_snapshot(&repos);
+            let _ = event_tx.blocking_send(AppEvent::PrStatusRefreshed { snapshot });
+        });
+    }
+
+    pub(crate) fn pr_status_refresh_deadline(&self) -> Option<Instant> {
+        (!self.pr_status_refresh_in_flight && !self.state.control.repos.is_empty())
+            .then_some(self.last_pr_status_refresh + PR_STATUS_REFRESH_INTERVAL)
+    }
+
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
         self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
@@ -540,6 +571,12 @@ impl App {
             self.next_animation_tick,
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
+                .flatten(),
+            // Gated like the git refresh: a headless loop with no client passes
+            // `false` here, so the timer can't busy-loop when the fetch (which is
+            // client-gated) won't actually run.
+            include_git_refresh
+                .then(|| self.pr_status_refresh_deadline())
                 .flatten(),
             self.next_auto_update_check,
             self.agent_metadata_deadline,
@@ -764,6 +801,8 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.workspaces.push(Workspace::test_new("test"));
+        // Quiet the PR-status refresh timer so only the git timer is asserted.
+        app.state.control.repos.clear();
         let now = Instant::now();
         app.last_git_remote_status_refresh = now - super::super::GIT_REMOTE_STATUS_REFRESH_INTERVAL;
 

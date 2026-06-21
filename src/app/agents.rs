@@ -669,7 +669,7 @@ impl App {
         if let Some(review) = self.state.control.review.as_mut() {
             review.refresh_branches();
             self.state.mode = Mode::Review;
-            self.state.control.focus = crate::app::state::FocusPane::Control;
+            self.state.control.focus = crate::app::state::FocusPane::Prs;
         } else {
             self.state.mode = Mode::Home;
         }
@@ -960,6 +960,9 @@ impl App {
             KeyCode::Esc => {
                 self.state.mode = Mode::Home;
                 self.state.control.review = None;
+                // The picker is launched from the Agents pane's repo picker;
+                // return focus there.
+                self.state.control.focus = crate::app::state::FocusPane::Agents;
             }
             KeyCode::Up => self.state.review_move_selection(-1),
             KeyCode::Down => self.state.review_move_selection(1),
@@ -977,19 +980,23 @@ impl App {
                     review.scroll = 0;
                 }
             }
-            // Plain `o` toggles between the repo's branches and the open PRs
-            // awaiting the user's review.
-            KeyCode::Char('o') if plain => self.toggle_review_picker_source(),
-            // `O` (shift+o) opens a PR by typed number — any PR in the repo,
-            // not just the ones awaiting the user's review.
-            KeyCode::Char('O') if plain => {
+            // `p` opens a PR-number input: type a number, Enter opens that PR
+            // for review, reusing its agent if one exists (req 12/13, replacing
+            // the old `O`). The PR-list toggle (`o`) is gone — the PR pane owns
+            // PR review entry now.
+            KeyCode::Char('p') if plain => {
                 if let Some(review) = self.state.control.review.as_mut() {
                     review.pr_number_input = Some(String::new());
                 }
             }
-            // The picker is not a text input, so plain `p` (or alt+p) submits a
-            // PR. Only meaningful on the branch list — the PR list IS PRs.
-            KeyCode::Char('p') if !prs_shown => self.submit_pr_for_review(),
+            // alt+p submits a PR for the selected branch (`gh pr create`).
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.submit_pr_for_review();
+            }
+            // alt+w opens the selected branch's PR in Reviewable (req 14).
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.open_selected_branch_in_reviewable();
+            }
             // Plain `c` checks the selected branch (or PR head) out into the
             // Main pane's worktree, when Main is a worktree of the repo browsed.
             KeyCode::Char('c') if plain => {
@@ -1320,17 +1327,158 @@ impl App {
     /// diff against the PR base and `alt+g` draft replies — and the review row
     /// is opened.
     fn open_selected_pr_for_review(&mut self) {
-        let Some(pr) = self
+        let Some((repo, pr)) = self
             .state
             .control
             .review
             .as_ref()
-            .and_then(|review| review.selected_pr())
+            .and_then(|review| Some((review.repo.clone(), review.selected_pr()?.clone())))
+        else {
+            return;
+        };
+        self.open_pr_for_review(repo, pr);
+    }
+
+    /// Open the PR pane's selected PR for review — reusing an existing agent on
+    /// its branch, else creating one (req 11/13). Maps the snapshot's PR to its
+    /// repository by key.
+    pub(crate) fn open_selected_person_pr_for_review(&mut self) {
+        let Some(person_pr) = self.state.selected_person_pr() else {
+            return;
+        };
+        let Some(repo) = self
+            .state
+            .control
+            .repos
+            .iter()
+            .find(|repo| repo.key == person_pr.pr.repo_key)
+            .cloned()
+        else {
+            self.state
+                .set_home_toast("repo not found", person_pr.pr.repo_key.clone());
+            return;
+        };
+        self.open_pr_for_review(repo, person_pr.pr.to_review_pr());
+    }
+
+    /// Resolve the `p` PR-number jump (PR pane / branch picker): open that PR for
+    /// review, reusing an existing agent already on its branch (req 13). The repo
+    /// is taken from the loaded snapshot when the number is listed (no `gh`
+    /// call), else probed across the scanned repos via `gh pr view`.
+    pub(crate) fn submit_pr_number_jump(&mut self) {
+        let Some(number) = self
+            .state
+            .control
+            .pr_number_jump
+            .as_ref()
+            .and_then(|digits| digits.parse::<u64>().ok())
+        else {
+            return; // empty input: keep collecting digits
+        };
+        self.state.control.pr_number_jump = None;
+        match self.resolve_pr_by_number(number) {
+            Some((repo, pr)) => self.open_pr_for_review(repo, pr),
+            None => self
+                .state
+                .set_home_toast("PR not found", format!("#{number} in your repos")),
+        }
+    }
+
+    fn resolve_pr_by_number(
+        &self,
+        number: u64,
+    ) -> Option<(crate::workspace::Repository, crate::workspace::ReviewPr)> {
+        if let Some(snapshot) = self.state.control.pr_status.as_ref() {
+            for person in &snapshot.people {
+                for person_pr in &person.prs {
+                    if person_pr.pr.number == number {
+                        if let Some(repo) = self
+                            .state
+                            .control
+                            .repos
+                            .iter()
+                            .find(|repo| repo.key == person_pr.pr.repo_key)
+                        {
+                            return Some((repo.clone(), person_pr.pr.to_review_pr()));
+                        }
+                    }
+                }
+            }
+        }
+        for repo in &self.state.control.repos {
+            if let Ok(pr) = crate::workspace::pr_by_number(&repo.root, number) {
+                return Some((repo.clone(), pr));
+            }
+        }
+        None
+    }
+
+    /// alt+w in the branch picker: open the selected branch's PR in Reviewable.
+    pub(crate) fn open_selected_branch_in_reviewable(&mut self) {
+        let Some(review) = self.state.control.review.as_ref() else {
+            return;
+        };
+        let repo = review.repo.clone();
+        let Some(branch) = review.selected_branch() else {
+            return;
+        };
+        // gh wants the short head ref, so strip a `remote/` prefix.
+        let branch_name = if branch.is_remote {
+            branch
+                .name
+                .rsplit_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or_else(|| branch.name.clone())
+        } else {
+            branch.name.clone()
+        };
+        match crate::workspace::pr_number_for_ref(&repo.root, &branch_name) {
+            Some(number) => self.open_pr_number_in_reviewable(&repo, number),
+            None => self
+                .state
+                .set_home_toast("no PR", format!("no open PR for {branch_name}")),
+        }
+    }
+
+    /// alt+w in the PR pane: open the selected PR in Reviewable.
+    pub(crate) fn open_selected_pr_in_reviewable(&mut self) {
+        let Some(person_pr) = self.state.selected_person_pr() else {
+            return;
+        };
+        let Some(repo) = self
+            .state
+            .control
+            .repos
+            .iter()
+            .find(|repo| repo.key == person_pr.pr.repo_key)
             .cloned()
         else {
             return;
         };
-        self.open_pr_for_review(pr);
+        self.open_pr_number_in_reviewable(&repo, person_pr.pr.number);
+    }
+
+    /// Open `https://reviewable.io/reviews/<owner>/<repo>/<number>` in Chrome,
+    /// detached with stdio nulled so it can't corrupt the TUI (req 14).
+    fn open_pr_number_in_reviewable(&mut self, repo: &crate::workspace::Repository, number: u64) {
+        let Some(owner_name) = crate::workspace::github_owner_name(&repo.root) else {
+            self.state
+                .set_home_toast("not a GitHub repo", repo.label.clone());
+            return;
+        };
+        let url = format!("https://reviewable.io/reviews/{owner_name}/{number}");
+        let spawn = std::process::Command::new("google-chrome")
+            .arg(&url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawn {
+            Ok(_) => self.state.set_home_toast("opening in Chrome", url),
+            Err(err) => self
+                .state
+                .set_home_toast("open in Chrome failed", format!("{err}")),
+        }
     }
 
     /// Enter on `O`'s PR-number input: look the typed number up via `gh`
@@ -1341,6 +1489,7 @@ impl App {
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
+        let repo = review.repo.clone();
         let Some(number) = review
             .pr_number_input
             .as_ref()
@@ -1348,13 +1497,12 @@ impl App {
         else {
             return; // empty (or absurdly long) input: keep collecting digits
         };
-        let repo_root = review.repo.root.clone();
-        match crate::workspace::pr_by_number(&repo_root, number) {
+        match crate::workspace::pr_by_number(&repo.root, number) {
             Ok(pr) => {
                 if let Some(review) = self.state.control.review.as_mut() {
                     review.pr_number_input = None;
                 }
-                self.open_pr_for_review(pr);
+                self.open_pr_for_review(repo, pr);
             }
             Err(err) => self
                 .state
@@ -1364,17 +1512,11 @@ impl App {
 
     /// Open `pr` for review, independent of what the Main pane holds (shared
     /// by the PR list's Enter/Space and `O`'s typed PR number).
-    fn open_pr_for_review(&mut self, pr: crate::workspace::ReviewPr) {
-        let Some(repo) = self
-            .state
-            .control
-            .review
-            .as_ref()
-            .map(|review| review.repo.clone())
-        else {
-            return;
-        };
-
+    fn open_pr_for_review(
+        &mut self,
+        repo: crate::workspace::Repository,
+        pr: crate::workspace::ReviewPr,
+    ) {
         // Reuse a workspace already on this PR's branch.
         let repo_key = crate::worktree::canonical_or_original(&repo.root);
         let existing = self.state.workspaces.iter().position(|ws| {
