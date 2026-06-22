@@ -204,9 +204,10 @@ pub struct PrStatusSnapshot {
 impl PrStatusSnapshot {
     /// Stack-ordered visible PRs for one person, honoring the green/grey toggles
     /// (red is always shown). Returns `(connector_prefix, PersonPr)` rows where
-    /// the prefix is the box-drawing stack art (`├ `, `└─┬ `, `│ └ `, …); a
-    /// hidden PR's visible descendants re-parent onto the nearest visible
-    /// ancestor (req 10), and roots are grouped by repo.
+    /// the prefix is the box-drawing stack art (`┌ `, `├ `, `└ `, `├─┬ `, … — a
+    /// flat spine with forks indented); a hidden PR's visible descendants
+    /// re-parent onto the nearest visible ancestor (req 10), and roots are
+    /// grouped by repo.
     pub fn visible_person_rows(
         &self,
         login: &str,
@@ -297,10 +298,9 @@ struct StackNode {
     order: usize,
 }
 
-/// A row in a rendered stack tree: the PR key plus an indentation prefix
-/// (two spaces per nesting level) that conveys the stack shape. A linear chain
-/// stays at a single level; a fork nests each branch a further level so the
-/// separate stacks are visually distinguishable.
+/// A row in a rendered stack tree: the PR key plus a box-drawing connector
+/// prefix (`┌ `, `├ `, `└ `, `├─┬ `, `│ └ `, …) that draws the stack shape. A
+/// linear chain renders as a flat vertical spine; only a true fork indents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackRow {
     pub key: PrKey,
@@ -353,13 +353,12 @@ impl StackGraph {
         StackGraph { nodes }
     }
 
-    /// Render the visible subset as a forest of indented stack trees. A hidden
-    /// node (failing `visible`) emits nothing but its visible descendants
+    /// Render the visible subset as a forest of box-drawing stack trees. A
+    /// hidden node (failing `visible`) emits nothing but its visible descendants
     /// re-parent onto the nearest visible ancestor (req 10). Roots are grouped by
-    /// repo (so each repo's stacks are contiguous), then by first-appearance.
-    /// Each emitted row carries an indentation prefix: a linear chain holds one
-    /// nesting level, and each branch of a fork nests a further level so the
-    /// separate stacks are distinguishable.
+    /// repo (so each repo's stacks are contiguous), then by first-appearance, and
+    /// each root's stack is drawn by [`draw_spine`](Self::draw_spine): a flat
+    /// vertical spine with `┌`/`├`/`└` connectors, forks indented.
     pub fn visible_forest(&self, visible: &dyn Fn(&PrKey) -> bool) -> Vec<StackRow> {
         // Nearest visible ancestor of `key` (climbing through hidden parents).
         let visible_parent = |key: &PrKey| -> Option<PrKey> {
@@ -394,37 +393,85 @@ impl StackGraph {
         let mut out = Vec::new();
         let mut visited = HashSet::new();
         for root in &roots {
-            self.walk_levels(root, 0, &vis_children, &mut out, &mut visited);
+            self.draw_spine(root, "", true, true, &vis_children, &mut out, &mut visited);
         }
         out
     }
 
-    /// Indent a stack by *fork depth* rather than raw chain depth. A node with a
-    /// single child is a linear continuation and stays at the same level; a root
-    /// or a fork (≥2 children) nests each child a level deeper, and each extra
-    /// branch one level deeper still, so distinct stacks read apart. The root
-    /// sits at level 0; everything beneath it holds at least one nesting level.
-    fn walk_levels(
+    /// Draw one stack as a flat spine plus indented forks. Starting at `head`,
+    /// follow the *last* child at each step — that linear run is the spine and
+    /// stays in a single column (`┌` for the spine head, `├` for the body, `└`
+    /// for its final node), so a long linear graphite stack never staircases.
+    /// The *earlier* children of any node are true forks: each branches off into
+    /// an indented sub-tree (recursively the same shape), drawn before the spine
+    /// continues, with a `│` carrying the spine column down past them.
+    ///
+    /// `prefix` is the box-drawing column to the left of this spine. `is_root`
+    /// gives the head a `┌` (or, for a lone single-PR stack, blank alignment).
+    /// `group_is_last` makes this spine's final node a `└` rather than `├`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_spine(
         &self,
-        key: &PrKey,
-        level: usize,
+        head: &PrKey,
+        prefix: &str,
+        is_root: bool,
+        group_is_last: bool,
         vis_children: &HashMap<PrKey, Vec<PrKey>>,
         out: &mut Vec<StackRow>,
         visited: &mut HashSet<PrKey>,
     ) {
-        if !visited.insert(key.clone()) {
-            return; // cycle guard
-        }
-        out.push(StackRow { key: key.clone(), prefix: "  ".repeat(level) });
-        let children = vis_children.get(key).cloned().unwrap_or_default();
-        if children.len() == 1 && level > 0 {
-            // Linear continuation: keep the stack flat at its current level.
-            self.walk_levels(&children[0], level, vis_children, out, visited);
-        } else {
-            // Root or fork: nest each branch one level deeper, and each further
-            // branch one level deeper again so the stacks stay distinguishable.
-            for (k, child) in children.iter().enumerate() {
-                self.walk_levels(child, level + 1 + k, vis_children, out, visited);
+        let mut cur = head.clone();
+        let mut first = is_root;
+        loop {
+            if !visited.insert(cur.clone()) {
+                return; // cycle guard
+            }
+            let kids = vis_children.get(&cur).cloned().unwrap_or_default();
+            let spine_child = kids.last().cloned();
+            let branches = &kids[..kids.len().saturating_sub(1)];
+            let is_spine_end = spine_child.is_none();
+
+            let row_prefix = if first && is_spine_end {
+                // A lone single-PR stack carries no tree decoration, just the
+                // two columns of alignment a `┌ `/`├ ` connector would occupy.
+                format!("{prefix}  ")
+            } else {
+                let connector = if first {
+                    '┌'
+                } else if is_spine_end && group_is_last {
+                    '└'
+                } else {
+                    '├'
+                };
+                // `─┬` widens the connector to align with the branch column's
+                // extra `│ ` so a forked child sits directly under the branch.
+                if branches.is_empty() {
+                    format!("{prefix}{connector} ")
+                } else {
+                    format!("{prefix}{connector}─┬ ")
+                }
+            };
+            out.push(StackRow { key: cur.clone(), prefix: row_prefix });
+            first = false;
+
+            // Earlier children fork off into indented sub-trees. The spine
+            // continues below this node (to `spine_child`), so they carry a `│`.
+            let branch_prefix = format!("{prefix}│ ");
+            for (i, branch) in branches.iter().enumerate() {
+                let branch_is_last = i + 1 == branches.len();
+                self.draw_spine(
+                    branch,
+                    &branch_prefix,
+                    false,
+                    branch_is_last,
+                    vis_children,
+                    out,
+                    visited,
+                );
+            }
+            match spine_child {
+                Some(child) => cur = child,
+                None => break,
             }
         }
     }
@@ -1096,8 +1143,8 @@ mod tests {
                 .collect();
         let rows = graph.visible_forest(&|key| visible_keys.contains(key));
         let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
-        // #2 hidden, so #3 attaches directly under #1 (the root) at one nesting.
-        assert_eq!(view, vec![(1, ""), (3, "  ")]);
+        // #2 hidden, so #3 attaches directly under #1: a flat two-node spine.
+        assert_eq!(view, vec![(1, "┌ "), (3, "└ ")]);
     }
 
     #[test]
@@ -1110,28 +1157,50 @@ mod tests {
         let graph = StackGraph::build(&prs);
         let rows = graph.visible_forest(&|_| true);
         let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
-        // Linear A->B->C: root flush, the whole chain holds at one nesting level.
-        assert_eq!(view, vec![(1, ""), (2, "  "), (3, "  ")]);
+        // Linear A->B->C draws as a flat vertical spine, not a staircase.
+        assert_eq!(view, vec![(1, "┌ "), (2, "├ "), (3, "└ ")]);
     }
 
     #[test]
-    fn stack_visible_forest_nests_each_fork_branch_a_level_deeper() {
-        // #1 forks into [#2 -> #3] and [#5]; the linear chain stays at one level,
-        // the second fork branch gets an extra level so the stacks read apart.
+    fn stack_visible_forest_draws_fork_with_box_connectors() {
+        // The shape from the spec: a spine #1->#2->#3->#6->#7 with a fork at #3
+        // into the side branches #4 and #5 (#6 is #3's last child, so the spine
+        // continues through it). #6 must appear last among #3's children, so it
+        // is ordered after #4 and #5 in the input.
         let prs = vec![
-            pr(1, "alice", "main", "a"), // root
-            pr(2, "alice", "a", "b"),    // child of #1
-            pr(3, "alice", "b", "c"),    // child of #2 (linear continuation)
-            pr(5, "alice", "a", "e"),    // child of #1 (fork sibling of #2)
+            pr(1, "alice", "main", "a"), // ┌ A
+            pr(2, "alice", "a", "b"),    // ├ B
+            pr(3, "alice", "b", "c"),    // ├─┬ C (forks)
+            pr(4, "alice", "c", "d"),    // │ ├ D (branch)
+            pr(5, "alice", "c", "e"),    // │ └ E (branch)
+            pr(6, "alice", "c", "f"),    // ├ F (spine continues)
+            pr(7, "alice", "f", "g"),    // └ G
         ];
         let graph = StackGraph::build(&prs);
         let rows = graph.visible_forest(&|_| true);
         let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
         assert_eq!(
             view,
-            vec![(1, ""), (2, "  "), (3, "  "), (5, "    ")],
-            "branch 0 (#2->#3) holds level 1; branch 1 (#5) nests to level 2"
+            vec![
+                (1, "┌ "),
+                (2, "├ "),
+                (3, "├─┬ "),
+                (4, "│ ├ "),
+                (5, "│ └ "),
+                (6, "├ "),
+                (7, "└ "),
+            ]
         );
+    }
+
+    #[test]
+    fn stack_visible_forest_lone_pr_has_no_connector() {
+        let prs = vec![pr(1, "alice", "main", "a")];
+        let graph = StackGraph::build(&prs);
+        let rows = graph.visible_forest(&|_| true);
+        let view: Vec<(u64, &str)> = rows.iter().map(|r| (r.key.1, r.prefix.as_str())).collect();
+        // A single-PR stack gets alignment but no dangling corner glyph.
+        assert_eq!(view, vec![(1, "  ")]);
     }
 
     #[test]
