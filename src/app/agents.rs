@@ -1590,6 +1590,10 @@ impl App {
         if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
             ws.cached_git_branch = Some(pr.head_branch.clone());
             ws.reviewing_pr = Some(pr);
+            // Fresh review: drop any drift baseline from a previous PR on this
+            // worktree; the pre-spawn fetch re-records `review_base_oid`.
+            ws.review_base_oid = None;
+            ws.pr_review_drift = None;
         }
         let review_open = self
             .state
@@ -1988,12 +1992,17 @@ impl App {
         tracing::info!(pr = pr.number, base = %base_branch, head = %head_branch, "starting review-refs fetch");
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
-            let result =
-                fetch_and_sync_review_worktree(&repo_root, &checkout_path, &base_branch, &head_branch);
+            let (base_oid, result) = fetch_and_sync_review_worktree(
+                &repo_root,
+                &checkout_path,
+                &base_branch,
+                &head_branch,
+            );
             let _ = event_tx.blocking_send(crate::events::AppEvent::ReviewBaseFetchFinished(
                 crate::events::ReviewBaseFetchResult {
                     workspace_id,
                     result,
+                    base_oid,
                 },
             ));
         });
@@ -2023,9 +2032,9 @@ impl App {
             .review_base_fetch
             .take()
             .expect("checked above");
-        if let Err(err) = result.result {
+        if let Err(err) = &result.result {
             tracing::warn!(base = %fetch.base_branch, error = %err, "review fetch/sync incomplete");
-            self.state.set_home_toast("review may be stale", err);
+            self.state.set_home_toast("review may be stale", err.clone());
         }
         let ws_idx = self
             .state
@@ -2033,6 +2042,15 @@ impl App {
             .iter()
             .position(|ws| ws.id == result.workspace_id);
         if let Some(ws_idx) = ws_idx {
+            // The row is about to diff against this freshly-fetched
+            // `origin/<base>`; record its oid as the drift baseline and clear any
+            // stale drift carried from a previous review of this worktree.
+            if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                if result.base_oid.is_some() {
+                    ws.review_base_oid = result.base_oid.clone();
+                }
+                ws.pr_review_drift = None;
+            }
             // Skip when a review row appeared meanwhile (e.g. re-attached);
             // spawning another would stack a duplicate row.
             let already_open = self
@@ -2298,12 +2316,16 @@ fn shell_single_quote(value: &str) -> String {
 /// anything: a dirty worktree (in-flight `CLAUDE:` notes) or local commits not
 /// on the remote skip it with an explanatory `Err` — the caller still opens
 /// the review row, just against the local state.
+///
+/// Returns the freshly-fetched `origin/<base>` oid (so the caller can later
+/// detect the diff base moving) alongside the sync result; the oid is reported
+/// even when the worktree sync is skipped, since the base ref is fetched first.
 fn fetch_and_sync_review_worktree(
     repo_root: &std::path::Path,
     checkout_path: &std::path::Path,
     base_branch: &str,
     head_branch: &str,
-) -> Result<(), String> {
+) -> (Option<String>, Result<(), String>) {
     let git = |cwd: &std::path::Path, args: &[&str]| -> Result<String, String> {
         match std::process::Command::new("git").current_dir(cwd).args(args).output() {
             Ok(out) if out.status.success() => {
@@ -2313,29 +2335,36 @@ fn fetch_and_sync_review_worktree(
             Err(err) => Err(format!("git not available: {err}")),
         }
     };
-    git(repo_root, &["fetch", "origin", base_branch, head_branch])
-        .map_err(|err| format!("fetch failed — remote refs may be stale: {err}"))?;
+    let origin_base = format!("origin/{base_branch}");
     let origin_head = format!("origin/{head_branch}");
-    let dirty = git(checkout_path, &["status", "--porcelain"])
-        .map_err(|err| format!("worktree status failed — not synced to {origin_head}: {err}"))?;
-    if !dirty.is_empty() {
-        return Err(format!(
-            "worktree has local changes — not synced to {origin_head}"
-        ));
+    if let Err(err) = git(repo_root, &["fetch", "origin", base_branch, head_branch]) {
+        return (None, Err(format!("fetch failed — remote refs may be stale: {err}")));
     }
-    let ahead = git(
-        checkout_path,
-        &["rev-list", "--count", &format!("{origin_head}..HEAD")],
-    )
-    .map_err(|err| format!("worktree state unknown — not synced to {origin_head}: {err}"))?;
-    if ahead != "0" {
-        return Err(format!(
-            "local commits ahead of {origin_head} — not synced"
-        ));
-    }
-    git(checkout_path, &["reset", "--hard", &origin_head])
-        .map_err(|err| format!("sync to {origin_head} failed: {err}"))?;
-    Ok(())
+    // The base ref is now fetched; capture its oid regardless of whether the
+    // head sync below runs, so base-drift detection has a reference point.
+    let base_oid = git(repo_root, &["rev-parse", &origin_base]).ok();
+    let sync = (|| {
+        let dirty = git(checkout_path, &["status", "--porcelain"]).map_err(|err| {
+            format!("worktree status failed — not synced to {origin_head}: {err}")
+        })?;
+        if !dirty.is_empty() {
+            return Err(format!(
+                "worktree has local changes — not synced to {origin_head}"
+            ));
+        }
+        let ahead = git(
+            checkout_path,
+            &["rev-list", "--count", &format!("{origin_head}..HEAD")],
+        )
+        .map_err(|err| format!("worktree state unknown — not synced to {origin_head}: {err}"))?;
+        if ahead != "0" {
+            return Err(format!("local commits ahead of {origin_head} — not synced"));
+        }
+        git(checkout_path, &["reset", "--hard", &origin_head])
+            .map_err(|err| format!("sync to {origin_head} failed: {err}"))?;
+        Ok(())
+    })();
+    (base_oid, sync)
 }
 
 /// Pull the actionable line out of a `gh pr checkout` failure. git narrates a
@@ -2618,6 +2647,7 @@ mod review_base_fetch_tests {
         app.handle_review_base_fetch_finished(crate::events::ReviewBaseFetchResult {
             workspace_id: "gone".into(),
             result: Err("fetch failed — remote refs may be stale: no network".into()),
+            base_oid: None,
         });
         assert!(app.state.control.review_base_fetch.is_none());
         let toast = app.state.toast.expect("failure must surface in a toast");
@@ -2698,17 +2728,23 @@ mod review_base_fetch_tests {
     #[test]
     fn fetch_and_sync_moves_a_clean_worktree_to_the_remote_head() {
         let (origin, clone) = origin_and_clone("review-sync-clean");
-        super::fetch_and_sync_review_worktree(&clone, &clone, "master", "pr-head")
-            .expect("clean worktree must sync");
+        let (base_oid, result) =
+            super::fetch_and_sync_review_worktree(&clone, &clone, "master", "pr-head");
+        result.expect("clean worktree must sync");
         assert_eq!(rev(&clone, "HEAD"), rev(&origin, "pr-head"));
+        // The fetched origin/master oid is reported for base-drift tracking.
+        assert_eq!(base_oid.as_deref(), Some(rev(&clone, "origin/master").as_str()));
     }
 
     #[test]
     fn fetch_and_sync_refuses_to_clobber_local_changes() {
         let (origin, clone) = origin_and_clone("review-sync-dirty");
         std::fs::write(clone.join("file.txt"), "CLAUDE: note\n").unwrap();
-        let err = super::fetch_and_sync_review_worktree(&clone, &clone, "master", "pr-head")
-            .expect_err("dirty worktree must not be reset");
+        let (base_oid, result) =
+            super::fetch_and_sync_review_worktree(&clone, &clone, "master", "pr-head");
+        // The base oid is reported even when the head sync is skipped.
+        assert!(base_oid.is_some(), "base oid should be captured before the sync");
+        let err = result.expect_err("dirty worktree must not be reset");
         assert!(err.contains("local changes"), "unexpected error: {err}");
         // The in-flight note survives, and HEAD stayed where it was.
         assert_eq!(
@@ -2730,10 +2766,70 @@ mod review_base_fetch_tests {
         app.handle_review_base_fetch_finished(crate::events::ReviewBaseFetchResult {
             workspace_id: "stale".into(),
             result: Ok(()),
+            base_oid: None,
         });
         // The in-flight fetch still owns the slot; nothing toasted.
         assert!(app.state.control.review_base_fetch.is_some());
         assert!(app.state.toast.is_none());
+    }
+
+    fn reviewing_workspace() -> crate::workspace::Workspace {
+        let mut ws = crate::workspace::Workspace::test_new("main");
+        ws.cached_git_branch = Some(pr().head_branch);
+        ws.reviewing_pr = Some(pr());
+        ws.attach_test_worktree();
+        ws
+    }
+
+    #[test]
+    fn drift_refresh_sets_then_clears_the_agents_pane_badge() {
+        let mut app = app();
+        let ws = reviewing_workspace();
+        let ws_id = ws.id.clone();
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+
+        // A drifted result lights the badge with its behind-count.
+        app.handle_internal_event(crate::events::AppEvent::PrReviewDriftRefreshed {
+            results: vec![crate::workspace::PrReviewDriftOutcome {
+                workspace_id: ws_id.clone(),
+                drift: crate::workspace::PrReviewDrift {
+                    head_behind: 2,
+                    head_drifted: true,
+                    base_moved: true,
+                },
+            }],
+        });
+        let drift = app.state.workspaces[0]
+            .pr_review_drift()
+            .expect("drift badge must be set");
+        assert_eq!(drift.head_behind, 2);
+        assert!(drift.head_drifted && drift.base_moved);
+
+        // A later clean result clears the badge.
+        app.handle_internal_event(crate::events::AppEvent::PrReviewDriftRefreshed {
+            results: vec![crate::workspace::PrReviewDriftOutcome {
+                workspace_id: ws_id,
+                drift: crate::workspace::PrReviewDrift::default(),
+            }],
+        });
+        assert!(app.state.workspaces[0].pr_review_drift().is_none());
+    }
+
+    #[test]
+    fn drift_badge_is_hidden_once_the_review_branch_is_no_longer_checked_out() {
+        let mut app = app();
+        let mut ws = reviewing_workspace();
+        // Stored drift, but HEAD moved off the PR branch (review now dormant).
+        ws.pr_review_drift = Some(crate::workspace::PrReviewDrift {
+            head_behind: 1,
+            head_drifted: true,
+            base_moved: false,
+        });
+        ws.cached_git_branch = Some("some/other-branch".to_string());
+        app.state.workspaces = vec![ws];
+        // The accessor gates on the PR head still being checked out.
+        assert!(app.state.workspaces[0].pr_review_drift().is_none());
     }
 }
 

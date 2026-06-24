@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use crate::detect::{Agent, AgentState};
 use crate::layout::PaneId;
-use crate::workspace::{GitStatusCacheEntry, PrStatusSnapshot, WorkspaceGitStatus};
+use crate::workspace::{
+    GitStatusCacheEntry, PrReviewDriftOutcome, PrStatusSnapshot, WorkspaceGitStatus,
+};
 
 #[derive(Debug)]
 pub struct WorktreeAddResult {
@@ -26,6 +28,9 @@ pub struct WorktreeRemoveResult {
 pub struct ReviewBaseFetchResult {
     pub workspace_id: String,
     pub result: Result<(), String>,
+    /// `origin/<base>` oid after the fetch — recorded so a later periodic fetch
+    /// can tell the diff base has moved. `None` when the fetch/rev-parse failed.
+    pub base_oid: Option<String>,
 }
 
 /// Direction a pane asked herdr to move focus, signalled by the program inside
@@ -132,4 +137,7 @@ pub enum AppEvent {
     ReviewBaseFetchFinished(ReviewBaseFetchResult),
     /// Background PR-status refresh completed (the PR pane's per-person snapshot).
     PrStatusRefreshed { snapshot: PrStatusSnapshot },
+    /// Periodic `git fetch` for PR-review worktrees completed, with each one's
+    /// drift from the remote (head advanced / base moved).
+    PrReviewDriftRefreshed { results: Vec<PrReviewDriftOutcome> },
 }

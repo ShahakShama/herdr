@@ -1297,6 +1297,9 @@ impl AppState {
                 let _ = snapshot;
                 Vec::new()
             }
+            // Fully handled in `App::handle_internal_event` (it mutates workspace
+            // drift state); never reaches this pane-update dispatcher.
+            AppEvent::PrReviewDriftRefreshed { .. } => Vec::new(),
         }
     }
 

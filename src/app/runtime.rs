@@ -257,6 +257,7 @@ impl App {
 
         self.start_git_status_refresh_if_due(now);
         self.start_pr_status_refresh_if_due(now);
+        self.start_pr_review_drift_refresh_if_due(now);
 
         if self
             .next_auto_update_check
@@ -534,6 +535,52 @@ impl App {
             .then_some(self.last_pr_status_refresh + PR_STATUS_REFRESH_INTERVAL)
     }
 
+    /// Kick off the periodic `git fetch` for PR-review worktrees when due, on
+    /// the same cadence as the PR-status poll. Off the UI thread, it freshens
+    /// `origin/<base>`/`origin/<head>` for every workspace actively reviewing a
+    /// PR and reports each one's drift via [`AppEvent::PrReviewDriftRefreshed`].
+    pub(crate) fn start_pr_review_drift_refresh_if_due(&mut self, now: Instant) {
+        if self.pr_review_drift_refresh_in_flight {
+            return;
+        }
+        if now < self.last_pr_review_drift_refresh + PR_STATUS_REFRESH_INTERVAL {
+            return;
+        }
+        let items = self.pr_review_drift_items();
+        if items.is_empty() {
+            // No review worktrees: mark done so the deadline doesn't busy-spin.
+            self.last_pr_review_drift_refresh = now;
+            return;
+        }
+        self.pr_review_drift_refresh_in_flight = true;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let results = crate::workspace::refresh_pr_review_drift(&items);
+            let _ = event_tx.blocking_send(AppEvent::PrReviewDriftRefreshed { results });
+        });
+    }
+
+    /// Snapshot the PR-review worktrees to check, captured on the UI thread so
+    /// the worker touches no shared state.
+    fn pr_review_drift_items(&self) -> Vec<crate::workspace::PrReviewDriftItem> {
+        self.state
+            .workspaces
+            .iter()
+            .filter_map(|ws| {
+                let pr = ws.reviewing_pr_active()?;
+                let space = ws.worktree_space()?;
+                Some(crate::workspace::PrReviewDriftItem {
+                    workspace_id: ws.id.clone(),
+                    repo_root: space.repo_root.clone(),
+                    checkout_path: space.checkout_path.clone(),
+                    base_branch: pr.base_branch.clone(),
+                    head_branch: pr.head_branch.clone(),
+                    review_base_oid: ws.review_base_oid.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Force an immediate PR-status refresh (the PR pane's `r`). No-op while a
     /// fetch is already in flight — that one will deliver fresh data.
     pub(crate) fn force_pr_status_refresh(&mut self) {
@@ -543,6 +590,11 @@ impl App {
         let now = Instant::now();
         self.last_pr_status_refresh = now.checked_sub(PR_STATUS_REFRESH_INTERVAL).unwrap_or(now);
         self.start_pr_status_refresh_if_due(now);
+        // The PR pane's `r` also freshens review-worktree drift, so a manual
+        // refresh reflects upstream head/base movement straight away.
+        self.last_pr_review_drift_refresh =
+            now.checked_sub(PR_STATUS_REFRESH_INTERVAL).unwrap_or(now);
+        self.start_pr_review_drift_refresh_if_due(now);
     }
 
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {

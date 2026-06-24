@@ -90,6 +90,10 @@ pub struct App {
     /// git-status refresh above. The deadline is gated while a fetch is in flight.
     pub(crate) last_pr_status_refresh: Instant,
     pub(crate) pr_status_refresh_in_flight: bool,
+    /// Periodic `git fetch` for PR-review worktrees (drift detection), on the
+    /// same cadence as the PR-status poll. Deadline gated while in flight.
+    pub(crate) last_pr_review_drift_refresh: Instant,
+    pub(crate) pr_review_drift_refresh_in_flight: bool,
     pub(crate) next_resize_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
@@ -561,6 +565,8 @@ impl App {
             git_status_cache: HashMap::new(),
             last_pr_status_refresh: Instant::now() - PR_STATUS_REFRESH_INTERVAL,
             pr_status_refresh_in_flight: false,
+            last_pr_review_drift_refresh: Instant::now() - PR_STATUS_REFRESH_INTERVAL,
+            pr_review_drift_refresh_in_flight: false,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
             next_animation_tick: None,
             next_auto_update_check: auto_updates_enabled(no_session)

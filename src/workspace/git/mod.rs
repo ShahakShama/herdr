@@ -2,6 +2,7 @@ mod config;
 #[cfg(test)]
 mod config_tests;
 mod discovery;
+mod pr_drift;
 mod pr_status;
 mod prs;
 mod repos;
@@ -11,6 +12,9 @@ mod test_support;
 
 pub use self::{
     discovery::{derive_label_from_cwd, git_branch, git_space_metadata, GitSpaceMetadata},
+    pr_drift::{
+        refresh_pr_review_drift, PrReviewDrift, PrReviewDriftItem, PrReviewDriftOutcome,
+    },
     pr_status::{
         fetch_pr_status_snapshot, github_owner_name, CiState, FetchedPr, PersonPr, PersonPrs,
         PrBucket, PrKey, PrStatusSnapshot, StackGraph, StackRow,

@@ -822,6 +822,28 @@ fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
             Span::styled("   ", Style::default()),
             Span::styled(label, Style::default().fg(label_color)),
         ];
+        // Drift badge for a PR-review worktree: surfaced ahead of the repo /
+        // status so it isn't the first thing clipped on a narrow pane. Head
+        // drift = the PR target moved upstream; base moved = the diff base
+        // advanced (press alt+R to re-target the review).
+        if let Some(drift) = app
+            .workspaces
+            .get(entry.ws_idx)
+            .and_then(|ws| ws.pr_review_drift())
+        {
+            let warn = Style::default().fg(p.peach).add_modifier(Modifier::BOLD);
+            if drift.head_drifted {
+                let badge = if drift.head_behind > 0 {
+                    format!(" · ⚠ {} behind PR", drift.head_behind)
+                } else {
+                    " · ⚠ drifted from PR".to_string()
+                };
+                spans.push(Span::styled(badge, warn));
+            }
+            if drift.base_moved {
+                spans.push(Span::styled(" · ⚠ base moved · alt+R", warn));
+            }
+        }
         if let Some(repo) = app
             .workspaces
             .get(entry.ws_idx)

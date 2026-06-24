@@ -93,6 +93,33 @@ impl App {
             return;
         }
 
+        if let AppEvent::PrReviewDriftRefreshed { results } = ev {
+            self.pr_review_drift_refresh_in_flight = false;
+            self.last_pr_review_drift_refresh = Instant::now();
+            let mut changed = false;
+            for outcome in results {
+                let Some(ws) = self
+                    .state
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.id == outcome.workspace_id)
+                else {
+                    continue;
+                };
+                // Store genuine drift only; a clean result clears the badge.
+                let next = (!outcome.drift.is_clean()).then_some(outcome.drift);
+                if ws.pr_review_drift != next {
+                    ws.pr_review_drift = next;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.render_dirty.store(true, Ordering::Release);
+                self.render_notify.notify_one();
+            }
+            return;
+        }
+
         if let AppEvent::WorktreeAddFinished(result) = ev {
             self.handle_worktree_add_finished(result);
             return;

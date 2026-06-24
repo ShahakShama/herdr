@@ -337,6 +337,8 @@ fn restore_workspace(
             tabs,
             detached_review: None,
             detached_terminal: None,
+            review_base_oid: None,
+            pr_review_drift: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

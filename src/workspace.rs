@@ -25,9 +25,11 @@ pub use self::{
     git::{
         default_scan_root, derive_label_from_cwd, fetch_pr_status_snapshot, git_branch,
         git_space_metadata, git_status_cache_key, github_owner_name, list_prs_for_my_review,
-        list_review_branches, pr_by_number, pr_number_for_ref, review_base, scan_repositories,
-        Branch, CiState, FetchedPr, GitSpaceMetadata, GitStatusCacheEntry, PersonPr, PersonPrs,
-        PrBucket, PrKey, PrStatusSnapshot, Repository, ReviewPr, StackGraph, StackRow,
+        list_review_branches, pr_by_number, pr_number_for_ref, refresh_pr_review_drift,
+        review_base, scan_repositories, Branch, CiState, FetchedPr, GitSpaceMetadata,
+        GitStatusCacheEntry, PersonPr, PersonPrs, PrBucket, PrKey, PrReviewDrift,
+        PrReviewDriftItem, PrReviewDriftOutcome, PrStatusSnapshot, Repository, ReviewPr,
+        StackGraph, StackRow,
     },
     tab::Tab,
 };
@@ -116,6 +118,15 @@ pub struct Workspace {
     /// Transient: the kept-alive terminal-row terminal when that row is detached
     /// (toggled closed). Re-attaching reuses this terminal. Not serialized.
     pub(crate) detached_terminal: Option<TerminalId>,
+    /// Transient: `origin/<base>` oid the open review row's `vimrev` was launched
+    /// against, used to detect that the diff base has since moved (see
+    /// [`PrReviewDrift::base_moved`]). Set when a PR review row spawns; not
+    /// serialized.
+    pub(crate) review_base_oid: Option<String>,
+    /// Transient: latest drift of this PR-review worktree from the remote, as of
+    /// the last periodic fetch (`None` = in sync or not a review). Drives the
+    /// agents-pane drift badge. Not serialized.
+    pub(crate) pr_review_drift: Option<PrReviewDrift>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -245,6 +256,8 @@ impl Workspace {
                 active_tab: 0,
                 detached_review: None,
                 detached_terminal: None,
+                review_base_oid: None,
+                pr_review_drift: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -683,6 +696,14 @@ impl Workspace {
         (self.cached_git_branch.as_deref() == Some(pr.head_branch.as_str())).then_some(pr)
     }
 
+    /// This PR-review worktree's drift from the remote (head advanced / base
+    /// moved), as of the last periodic fetch — but only while the workspace is
+    /// still actively reviewing that PR. Drives the agents-pane drift badge.
+    pub fn pr_review_drift(&self) -> Option<&PrReviewDrift> {
+        self.reviewing_pr_active()?;
+        self.pr_review_drift.as_ref()
+    }
+
     pub fn git_ahead_behind(&self) -> Option<(usize, usize)> {
         self.cached_git_ahead_behind
     }
@@ -867,6 +888,8 @@ impl Workspace {
             active_tab: 0,
             detached_review: None,
             detached_terminal: None,
+            review_base_oid: None,
+            pr_review_drift: None,
             test_runtimes: HashMap::new(),
         }
     }
