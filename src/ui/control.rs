@@ -832,13 +832,11 @@ fn render_agents_half(app: &AppState, frame: &mut Frame, area: Rect) {
             .and_then(|ws| ws.pr_review_drift())
         {
             let warn = Style::default().fg(p.peach).add_modifier(Modifier::BOLD);
-            if drift.head_drifted {
-                let badge = if drift.head_behind > 0 {
-                    format!(" · ⚠ {} behind PR", drift.head_behind)
-                } else {
-                    " · ⚠ drifted from PR".to_string()
-                };
-                spans.push(Span::styled(badge, warn));
+            if drift.head_behind > 0 {
+                spans.push(Span::styled(
+                    format!(" · ⚠ {} behind PR", drift.head_behind),
+                    warn,
+                ));
             }
             if drift.base_moved {
                 spans.push(Span::styled(" · ⚠ base moved · alt+R", warn));
