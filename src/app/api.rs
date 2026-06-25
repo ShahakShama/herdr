@@ -200,6 +200,27 @@ impl App {
             self.refresh_new_herdr_toast_context_for_update(update, &previous_toast);
             self.emit_pane_state_update(update);
         }
+        // A just-booted agent reaches idle here; deliver any queued input (e.g.
+        // the PR pane's `b` → `/bty`) now that the agent can accept it. The
+        // helper no-ops unless the updated pane is an agent pane with queued
+        // input that is ready, and clears the queue on a successful send so the
+        // command fires exactly once.
+        for update in &pane_updates {
+            if self
+                .state
+                .workspaces
+                .get(update.ws_idx)
+                .and_then(|ws| ws.agent_pane())
+                == Some(update.pane_id)
+                && self
+                    .state
+                    .workspaces
+                    .get(update.ws_idx)
+                    .is_some_and(|ws| ws.pending_agent_input.is_some())
+            {
+                self.flush_pending_agent_input(update.ws_idx);
+            }
+        }
         self.sync_agent_metadata_deadline();
         if let Some((pane_id, agent)) = released_agent {
             if pane_updates.iter().any(|update| update.pane_id == pane_id) {

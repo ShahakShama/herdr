@@ -127,6 +127,19 @@ pub struct Workspace {
     /// the last periodic fetch (`None` = in sync or not a review). Drives the
     /// agents-pane drift badge. Not serialized.
     pub(crate) pr_review_drift: Option<PrReviewDrift>,
+    /// Transient: when set, the next-spawned review row diffs the current branch
+    /// against `origin/<branch>` (alt+d) instead of its graphite-parent/PR base,
+    /// so it surfaces everything not yet on the remote — unpushed commits plus
+    /// uncommitted working-tree changes. The other review entry points clear it.
+    /// Not serialized.
+    pub(crate) review_vs_origin: bool,
+    /// Transient: text queued to be typed into this workspace's agent pane once
+    /// the agent has finished booting and is idle/ready (see
+    /// [`crate::app::App::flush_pending_agent_input`]). Used by the PR pane's
+    /// `b` action to auto-run `/bty` in a freshly-spawned PR-review agent — the
+    /// agent process needs a moment to accept input, so the text is held here
+    /// and flushed on the next agent-status update. Not serialized.
+    pub(crate) pending_agent_input: Option<String>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
@@ -258,6 +271,8 @@ impl Workspace {
                 detached_terminal: None,
                 review_base_oid: None,
                 pr_review_drift: None,
+                review_vs_origin: false,
+                pending_agent_input: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -890,6 +905,8 @@ impl Workspace {
             detached_terminal: None,
             review_base_oid: None,
             pr_review_drift: None,
+            review_vs_origin: false,
+            pending_agent_input: None,
             test_runtimes: HashMap::new(),
         }
     }

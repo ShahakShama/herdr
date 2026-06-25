@@ -339,6 +339,8 @@ fn restore_workspace(
             detached_terminal: None,
             review_base_oid: None,
             pr_review_drift: None,
+            review_vs_origin: false,
+            pending_agent_input: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

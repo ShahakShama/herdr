@@ -7,6 +7,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::app::agents::PrSite;
 use crate::app::state::{
     AgentsPaneView, AppState, FocusPane, LeftHalf, Mode, PrPaneView, ReviewState,
 };
@@ -92,6 +93,15 @@ impl App {
         if self.state.main_focused() && event.modifiers.contains(KeyModifiers::ALT) {
             match event.code {
                 KeyCode::Char('r') => {
+                    // Plain review shows the branch/PR base; clear any alt+d
+                    // vs-origin flag before the shared spawn helper reads it.
+                    if let Some(ws) = self
+                        .state
+                        .active
+                        .and_then(|ws_idx| self.state.workspaces.get_mut(ws_idx))
+                    {
+                        ws.review_vs_origin = false;
+                    }
                     self.toggle_review_row();
                     return false;
                 }
@@ -104,8 +114,25 @@ impl App {
                     self.reload_review_row();
                     return false;
                 }
+                // alt+d reviews the current branch against its remote
+                // `origin/<branch>`, so the diff includes everything not yet
+                // pushed — unpushed commits and uncommitted working-tree changes.
+                KeyCode::Char('d') => {
+                    self.reload_review_row_vs_origin();
+                    return false;
+                }
                 KeyCode::Char('t') => {
                     self.toggle_terminal_row();
+                    return false;
+                }
+                // alt+w opens the active worktree's branch PR in Graphite;
+                // alt+W (shift) opens it in Reviewable.
+                KeyCode::Char('w') => {
+                    self.open_active_worktree_in_review(PrSite::Graphite);
+                    return false;
+                }
+                KeyCode::Char('W') => {
+                    self.open_active_worktree_in_review(PrSite::Reviewable);
                     return false;
                 }
                 // alt+g, while the review row is focused, tells the workspace's
@@ -172,13 +199,21 @@ impl App {
         }
         let plain = !event.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
         if event.modifiers.contains(KeyModifiers::ALT) {
-            // alt+w opens the selected PR in Reviewable (Person view only); other
-            // alt chords (focus-nav, quit, …) fall through to apply_home_key.
-            if event.code == KeyCode::Char('w')
-                && matches!(self.state.control.pr_view, PrPaneView::Person { .. })
-            {
-                self.open_selected_pr_in_reviewable();
-                return true;
+            // alt+w opens the selected PR in Graphite; alt+W (shift) in Reviewable
+            // (Person view only); other alt chords (focus-nav, quit, …) fall
+            // through to apply_home_key.
+            if matches!(self.state.control.pr_view, PrPaneView::Person { .. }) {
+                match event.code {
+                    KeyCode::Char('w') => {
+                        self.open_selected_pr_in_review(PrSite::Graphite);
+                        return true;
+                    }
+                    KeyCode::Char('W') => {
+                        self.open_selected_pr_in_review(PrSite::Reviewable);
+                        return true;
+                    }
+                    _ => {}
+                }
             }
             return false;
         }
@@ -209,6 +244,9 @@ impl App {
                 KeyCode::Char('l') if plain => self.state.pr_toggle_green(),
                 KeyCode::Char('o') if plain => self.state.pr_toggle_grey(),
                 KeyCode::Enter | KeyCode::Char(' ') => self.open_selected_person_pr_for_review(),
+                KeyCode::Char('b') if plain => {
+                    self.open_selected_person_pr_for_review_with_bty()
+                }
                 KeyCode::Char('q') | KeyCode::Esc if plain => self.state.pr_back_to_people(),
                 KeyCode::Char('p') if plain => {
                     self.state.control.pr_number_jump = Some(String::new());

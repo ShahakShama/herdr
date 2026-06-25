@@ -7,6 +7,26 @@ use crate::api::schema::{AgentStartParams, SplitDirection};
 /// TODO: make the agent selectable in the create form.
 const CREATE_AGENT_DEFAULT_ARGV: &[&str] = &["claude"];
 
+/// Web review surface a PR can be opened in. `alt+w` opens Graphite's PR page;
+/// `alt+W` opens Reviewable.
+#[derive(Clone, Copy)]
+pub(crate) enum PrSite {
+    Graphite,
+    Reviewable,
+}
+
+impl PrSite {
+    /// Build the PR URL for `<owner>/<repo>` (the `owner_name` form) and number.
+    fn pr_url(self, owner_name: &str, number: u64) -> String {
+        match self {
+            PrSite::Graphite => {
+                format!("https://app.graphite.dev/github/pr/{owner_name}/{number}")
+            }
+            PrSite::Reviewable => format!("https://reviewable.io/reviews/{owner_name}/{number}"),
+        }
+    }
+}
+
 impl App {
     pub(super) fn collect_agent_infos(&self) -> Vec<crate::api::schema::AgentInfo> {
         self.state
@@ -993,9 +1013,13 @@ impl App {
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.submit_pr_for_review();
             }
-            // alt+w opens the selected branch's PR in Reviewable (req 14).
+            // alt+w opens the selected branch's PR in Graphite; alt+W (shift)
+            // opens it in Reviewable (req 14).
             KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => {
-                self.open_selected_branch_in_reviewable();
+                self.open_selected_branch_in_review(PrSite::Graphite);
+            }
+            KeyCode::Char('W') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.open_selected_branch_in_review(PrSite::Reviewable);
             }
             // Plain `c` checks the selected branch (or PR head) out into the
             // Main pane's worktree, when Main is a worktree of the repo browsed.
@@ -1361,6 +1385,107 @@ impl App {
         self.open_pr_for_review(repo, person_pr.pr.to_review_pr());
     }
 
+    /// `b` in the PR pane (Person view): open the selected PR for review exactly
+    /// as Space/Enter does, then auto-run `/bty` in the resulting agent so it
+    /// addresses the PR's review comments straight away.
+    ///
+    /// The agent (claude) is spawned during the open and needs a moment to boot
+    /// before it accepts input, so the command can't be sent inline. We queue it
+    /// on the now-active workspace's [`Workspace::pending_agent_input`] and let
+    /// [`Self::flush_pending_agent_input`] deliver it once the agent reports
+    /// idle/ready (see that helper). We also attempt an immediate flush here to
+    /// cover the reuse path, where [`Self::open_pr_for_review`] reuses an agent
+    /// already running on the PR branch (no boot wait needed).
+    pub(crate) fn open_selected_person_pr_for_review_with_bty(&mut self) {
+        self.open_selected_person_pr_for_review();
+        let Some(ws_idx) = self.state.active else {
+            return; // open failed (toasted already); nothing to queue
+        };
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            ws.pending_agent_input = Some("/bty".to_string());
+        }
+        self.flush_pending_agent_input(ws_idx);
+    }
+
+    /// If workspace `ws_idx` has queued [`Workspace::pending_agent_input`] and its
+    /// agent pane is running and idle/ready, type the queued text into the agent
+    /// pane and submit it with Enter, then clear the queue. Returns whether the
+    /// input was sent.
+    ///
+    /// Readiness criterion: the agent terminal's detected [`AgentState::Idle`]
+    /// (prompt visible, nothing running) AND no half-typed prompt already in the
+    /// pane. A freshly-spawned claude starts `Unknown` and only reaches `Idle`
+    /// once its input prompt has rendered — exactly when it can accept a slash
+    /// command. Sending earlier would be dropped. Clearing the queue on a
+    /// successful send guarantees the text is delivered exactly once; a failed
+    /// (not-yet-ready) attempt leaves the queue set so the next status update
+    /// retries. Mirrors the send pattern of [`Self::send_claude_fix_command`].
+    pub(crate) fn flush_pending_agent_input(&mut self, ws_idx: usize) -> bool {
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        if ws.pending_agent_input.is_none() {
+            return false;
+        }
+        let Some(agent_pane) = ws.agent_pane() else {
+            return false;
+        };
+        // Gate on the agent being booted and idle (ready for input).
+        let ready = ws
+            .pane_state(agent_pane)
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(|terminal| terminal.state == crate::detect::AgentState::Idle);
+        if !ready {
+            return false;
+        }
+        // Don't clobber a prompt the user has started typing (fresh agents are
+        // empty, so this is a no-op there but keeps the reuse path safe).
+        if self.agent_prompt_busy(ws_idx, agent_pane) {
+            return false;
+        }
+        let Some(text) = ws.pending_agent_input.clone() else {
+            return false;
+        };
+        let send_result: Result<(), String> = match self.lookup_runtime_sender(ws_idx, agent_pane) {
+            None => Err("agent not running".to_string()),
+            Some(runtime) => {
+                let text_bytes = super::api_helpers::encode_api_text(runtime, &text);
+                runtime
+                    .try_send_bytes(bytes::Bytes::from(text_bytes))
+                    .map_err(|err| err.to_string())
+                    .and_then(|()| {
+                        // Submit with a separate inline Enter, as the API
+                        // `pane.send_input` path does (text then key, same
+                        // channel, in order); see `send_claude_fix_command`.
+                        let enter = runtime.encode_terminal_key(
+                            crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::Enter,
+                                crossterm::event::KeyModifiers::empty(),
+                            )
+                            .into(),
+                        );
+                        runtime
+                            .try_send_bytes(bytes::Bytes::from(enter))
+                            .map_err(|err| err.to_string())
+                    })
+            }
+        };
+        match send_result {
+            Ok(()) => {
+                // Clear the queue so the input is sent exactly once.
+                if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                    ws.pending_agent_input = None;
+                }
+                true
+            }
+            Err(err) => {
+                // Leave the queue set so the next status update retries.
+                tracing::warn!(error = %err, "failed to send pending agent input");
+                false
+            }
+        }
+    }
+
     /// Resolve the `p` PR-number jump (PR pane / branch picker): open that PR for
     /// review, reusing an existing agent already on its branch (req 13). The repo
     /// is taken from the loaded snapshot when the number is listed (no `gh`
@@ -1413,8 +1538,9 @@ impl App {
         None
     }
 
-    /// alt+w in the branch picker: open the selected branch's PR in Reviewable.
-    pub(crate) fn open_selected_branch_in_reviewable(&mut self) {
+    /// alt+w / alt+W in the branch picker: open the selected branch's PR on the
+    /// given review site (Graphite / Reviewable).
+    pub(crate) fn open_selected_branch_in_review(&mut self, site: PrSite) {
         let Some(review) = self.state.control.review.as_ref() else {
             return;
         };
@@ -1432,16 +1558,12 @@ impl App {
         } else {
             branch.name.clone()
         };
-        match crate::workspace::pr_number_for_ref(&repo.root, &branch_name) {
-            Some(number) => self.open_pr_number_in_reviewable(&repo, number),
-            None => self
-                .state
-                .set_home_toast("no PR", format!("no open PR for {branch_name}")),
-        }
+        self.open_branch_in_review(&repo.root, &repo.label, &branch_name, site);
     }
 
-    /// alt+w in the PR pane: open the selected PR in Reviewable.
-    pub(crate) fn open_selected_pr_in_reviewable(&mut self) {
+    /// alt+w / alt+W in the PR pane: open the selected PR on the given review
+    /// site (Graphite / Reviewable).
+    pub(crate) fn open_selected_pr_in_review(&mut self, site: PrSite) {
         let Some(person_pr) = self.state.selected_person_pr() else {
             return;
         };
@@ -1455,18 +1577,63 @@ impl App {
         else {
             return;
         };
-        self.open_pr_number_in_reviewable(&repo, person_pr.pr.number);
+        self.open_pr_number_in_review(&repo.root, &repo.label, person_pr.pr.number, site);
     }
 
-    /// Open `https://reviewable.io/reviews/<owner>/<repo>/<number>` in Chrome,
-    /// detached with stdio nulled so it can't corrupt the TUI (req 14).
-    fn open_pr_number_in_reviewable(&mut self, repo: &crate::workspace::Repository, number: u64) {
-        let Some(owner_name) = crate::workspace::github_owner_name(&repo.root) else {
-            self.state
-                .set_home_toast("not a GitHub repo", repo.label.clone());
+    /// alt+w / alt+W with Main focused: open the active worktree's current
+    /// branch's PR on the given review site (Graphite / Reviewable).
+    pub(crate) fn open_active_worktree_in_review(&mut self, site: PrSite) {
+        let Some(ws_idx) = self.state.active else {
             return;
         };
-        let url = format!("https://reviewable.io/reviews/{owner_name}/{number}");
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return;
+        };
+        let Some(branch) = ws.branch() else {
+            self.state
+                .set_home_toast("no PR", "no branch in this worktree");
+            return;
+        };
+        let repo_root = ws
+            .worktree_space()
+            .map(|space| space.repo_root.clone())
+            .unwrap_or_else(|| ws.identity_cwd.clone());
+        let label = ws.display_name();
+        self.open_branch_in_review(&repo_root, &label, &branch, site);
+    }
+
+    /// Resolve `branch_name`'s open PR via `gh` and open it on `site`, toasting
+    /// when the branch has no open PR.
+    fn open_branch_in_review(
+        &mut self,
+        repo_root: &Path,
+        label: &str,
+        branch_name: &str,
+        site: PrSite,
+    ) {
+        match crate::workspace::pr_number_for_ref(repo_root, branch_name) {
+            Some(number) => self.open_pr_number_in_review(repo_root, label, number, site),
+            None => self
+                .state
+                .set_home_toast("no PR", format!("no open PR for {branch_name}")),
+        }
+    }
+
+    /// Open PR `number` on `site` in Chrome, detached with stdio nulled so it
+    /// can't corrupt the TUI (req 14).
+    fn open_pr_number_in_review(
+        &mut self,
+        repo_root: &Path,
+        label: &str,
+        number: u64,
+        site: PrSite,
+    ) {
+        let Some(owner_name) = crate::workspace::github_owner_name(repo_root) else {
+            self.state
+                .set_home_toast("not a GitHub repo", label.to_string());
+            return;
+        };
+        let url = site.pr_url(&owner_name, number);
         let spawn = std::process::Command::new("google-chrome")
             .arg(&url)
             .stdin(std::process::Stdio::null())
@@ -1582,30 +1749,20 @@ impl App {
     }
 
     /// Shared tail of opening a PR for review in workspace `ws_idx` (which is
-    /// already active): tag it with the PR, open the review row against the PR
-    /// base (respawning a stale one), and keep the picker open and focused so
-    /// more PRs can be opened straight away.
+    /// already active): tag it with the PR and land focus on the agent (Main)
+    /// pane. The review row is *not* opened here — the user opens it manually
+    /// with `alt+r`/`alt+R` once they're ready to look at the diff.
     fn finish_open_pr_review(&mut self, ws_idx: usize, pr: crate::workspace::ReviewPr) {
         let toast = format!("PR #{} · {}", pr.number, pr.head_branch);
         if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
             ws.cached_git_branch = Some(pr.head_branch.clone());
             ws.reviewing_pr = Some(pr);
             // Fresh review: drop any drift baseline from a previous PR on this
-            // worktree; the pre-spawn fetch re-records `review_base_oid`.
+            // worktree; the manual review-row spawn re-records `review_base_oid`.
             ws.review_base_oid = None;
             ws.pr_review_drift = None;
-        }
-        let review_open = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(|ws| ws.pane_with_role(crate::pane::PaneRole::Review))
-            .is_some();
-        if review_open {
-            // Retarget an already-open review row at the PR's base.
-            self.respawn_review_row_after_checkout(ws_idx);
-        } else {
-            self.toggle_review_row();
+            // Show the PR base, not a stale alt+d vs-origin diff.
+            ws.review_vs_origin = false;
         }
         self.state.mark_session_dirty();
         // Land in the new review workspace (Main) on a clean home surface. This
@@ -1739,6 +1896,40 @@ impl App {
         let Some(ws_idx) = self.state.active else {
             return;
         };
+        // Reloading the normal review must show the branch/PR base, not the
+        // alt+d vs-origin diff; clear the flag a prior alt+d may have left set.
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            ws.review_vs_origin = false;
+        }
+        let review_open = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|ws| ws.pane_with_role(PaneRole::Review).is_some());
+        if review_open {
+            self.respawn_review_row_after_checkout(ws_idx);
+        } else {
+            self.toggle_review_row();
+        }
+    }
+
+    /// alt+d: reload the active workspace's review row to diff the current branch
+    /// against its own remote tracking branch `origin/<branch>`. Unlike the
+    /// graphite-parent/PR base of [`Self::reload_review_row`], this base captures
+    /// everything local that isn't on the remote yet — unpushed commits AND
+    /// uncommitted working-tree changes (`vimrev`/`BranchReview` includes the
+    /// latter automatically). When the row is open this kills and re-spawns its
+    /// `vimrev`; when it's closed it opens a fresh one.
+    pub(crate) fn reload_review_row_vs_origin(&mut self) {
+        use crate::pane::PaneRole;
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        // Set before spawning: `row_spawn_spec` reads this flag at spawn time,
+        // and `respawn_review_row_after_checkout` kills then re-spawns the row.
+        if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+            ws.review_vs_origin = true;
+        }
         let review_open = self
             .state
             .workspaces
@@ -2234,16 +2425,25 @@ impl App {
                         .set_home_toast("review failed", "agent has no branch");
                     return None;
                 };
-                // While reviewing someone else's PR, diff against the PR's base
-                // as GitHub does (`origin/<base>`); the pre-spawn fetch synced
-                // the worktree to `origin/<head>` (see
+                // alt+d takes priority: diff the current branch against its own
+                // remote (`origin/<branch>`), surfacing everything not yet pushed
+                // — unpushed commits plus uncommitted working-tree changes (which
+                // `vimrev`/`BranchReview` folds in automatically).
+                //
+                // Otherwise, while reviewing someone else's PR, diff against the
+                // PR's base as GitHub does (`origin/<base>`); the pre-spawn fetch
+                // synced the worktree to `origin/<head>` (see
                 // [`fetch_and_sync_review_worktree`]), so the worktree side
                 // matches the remote PR while staying editable for `CLAUDE:`
                 // notes. Otherwise resolve the usual graphite-parent/
                 // default-branch base.
-                let base = match ws.reviewing_pr_active() {
-                    Some(pr) => format!("origin/{}", pr.base_branch),
-                    None => crate::workspace::review_base(&repo_root, &agent_branch),
+                let base = if ws.review_vs_origin {
+                    format!("origin/{agent_branch}")
+                } else {
+                    match ws.reviewing_pr_active() {
+                        Some(pr) => format!("origin/{}", pr.base_branch),
+                        None => crate::workspace::review_base(&repo_root, &agent_branch),
+                    }
                 };
                 let review_cmd = std::env::var("HERDR_REVIEW_CMD")
                     .unwrap_or_else(|_| "vimrev".to_string());
@@ -2631,6 +2831,29 @@ mod review_base_fetch_tests {
         // stays editable for CLAUDE: notes.
         assert!(
             command_line.ends_with("'origin/master'"),
+            "unexpected review command: {command_line}"
+        );
+    }
+
+    #[test]
+    fn alt_d_review_row_diffs_the_branch_against_its_own_origin() {
+        let mut app = app();
+        let mut ws = crate::workspace::Workspace::test_new("main");
+        ws.cached_git_branch = Some("shahak/foo".to_string());
+        // alt+d ignores any reviewing-PR base in favour of origin/<branch>.
+        ws.reviewing_pr = Some(pr());
+        ws.review_vs_origin = true;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+
+        let (argv, _cwd) = app
+            .row_spawn_spec(0, crate::pane::PaneRole::Review)
+            .expect("review row must spawn");
+        let command_line = argv.last().expect("argv has a command line");
+        // vs-origin: diff against the branch's own remote tracking branch, which
+        // `vimrev`/`BranchReview` folds uncommitted working-tree changes into.
+        assert!(
+            command_line.ends_with("'origin/shahak/foo'"),
             "unexpected review command: {command_line}"
         );
     }
