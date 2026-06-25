@@ -30,13 +30,15 @@ use super::{Repository, ReviewPr};
 /// Priority when a PR could fit more than one: RED > GREEN > GREY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrBucket {
-    /// Waiting for me: an unresolved thread where I wasn't the last to reply,
-    /// or (for others' PRs) an unreviewed PR with no threads at all.
+    /// Waiting for me: a thread where I wasn't the last to reply, or (for
+    /// others' PRs) an unreviewed PR with no threads at all.
     Red,
-    /// Lgtm'd: approved (others' PRs: by me; my PRs: by any reviewer).
+    /// Lgtm'd: Reviewable reports the review complete (`SUCCESS`); or, on a
+    /// non-Reviewable repo, approved (others' PRs: by me; my PRs: by any
+    /// reviewer).
     Green,
-    /// Waiting on the other side: every unresolved thread has me as the last
-    /// replier, or (for my PRs) it is unreviewed.
+    /// Waiting on the other side: every thread has me as the last replier, or
+    /// (for my PRs) it is unreviewed.
     Grey,
 }
 
@@ -94,6 +96,11 @@ pub struct FetchedPr {
     pub reviews: Vec<ReviewSubmission>,
     /// CI status of the PR's latest commit (status-check rollup).
     pub ci: CiState,
+    /// State of the `code-review/reviewable` commit status (`SUCCESS`,
+    /// `PENDING`, …), or `None` when the repo isn't behind Reviewable. When
+    /// present it is the source of truth for classification — see
+    /// [`classify_pr`].
+    pub reviewable_state: Option<String>,
 }
 
 impl FetchedPr {
@@ -113,9 +120,42 @@ impl FetchedPr {
 
 /// Classify one PR for the current user (`me`). Priority RED > GREEN > GREY.
 ///
-/// Resolved threads need no reply, so only UNRESOLVED threads drive the
-/// last-replier logic; a PR with no review threads at all is "unreviewed".
+/// When the PR carries a Reviewable status (`reviewable_state`, from the
+/// `code-review/reviewable` commit status), Reviewable — not GitHub — owns the
+/// truth: it resolves threads and drives `reviewDecision` on people's behalf, so
+/// GitHub's own flags are unreliable (a thread Reviewable still considers open
+/// shows up `isResolved` on GitHub). There:
+///
+/// * GREEN — Reviewable reports `SUCCESS` (the review is complete).
+/// * RED — not `SUCCESS`, and a thread's last comment isn't mine (or, for
+///   someone else's PR, there are no threads at all). `isResolved` is ignored,
+///   since Reviewable resolves threads on the author's behalf.
+/// * GREY — not `SUCCESS`, and every thread is mine-last (nothing awaits me).
+///
+/// Without a Reviewable status (a repo that doesn't use it) fall back to the
+/// GitHub-native rules in [`classify_github`].
 pub fn classify_pr(pr: &FetchedPr, me: &str) -> PrBucket {
+    let Some(state) = pr.reviewable_state.as_deref() else {
+        return classify_github(pr, me);
+    };
+    if state == "SUCCESS" {
+        return PrBucket::Green;
+    }
+    let is_mine = pr.author == me;
+    let waiting_on_me = pr
+        .threads
+        .iter()
+        .any(|t| t.last_comment_author.as_deref() != Some(me));
+    if waiting_on_me || (!is_mine && pr.threads.is_empty()) {
+        return PrBucket::Red;
+    }
+    PrBucket::Grey
+}
+
+/// GitHub-native classification, for repos that don't use Reviewable. Resolved
+/// threads need no reply, so only UNRESOLVED threads drive the last-replier
+/// logic; a PR with no review threads at all is "unreviewed".
+fn classify_github(pr: &FetchedPr, me: &str) -> PrBucket {
     let is_mine = pr.author == me;
     let waiting_on_me = pr
         .threads
@@ -648,6 +688,7 @@ fn fetch_global_prs(
             threads: detail.threads,
             reviews: detail.reviews,
             ci: detail.ci,
+            reviewable_state: detail.reviewable_state,
         })
         .collect();
     Ok((viewer, prs))
@@ -752,12 +793,10 @@ fn detail_from_raw(node: RawDetailNode) -> PrDetail {
             author: review.author.map(|a| a.login).unwrap_or_default(),
         })
         .collect();
-    let ci = node
-        .commits
-        .nodes
-        .into_iter()
-        .last()
-        .and_then(|n| n.commit.status_check_rollup)
+    let last_commit = node.commits.nodes.into_iter().last().map(|n| n.commit);
+    let ci = last_commit
+        .as_ref()
+        .and_then(|commit| commit.status_check_rollup.as_ref())
         .map(|rollup| match rollup.state.as_str() {
             "SUCCESS" => CiState::Passing,
             "FAILURE" | "ERROR" => CiState::Failing,
@@ -765,12 +804,27 @@ fn detail_from_raw(node: RawDetailNode) -> PrDetail {
             _ => CiState::None,
         })
         .unwrap_or(CiState::None);
+    // The legacy `status.contexts` list holds only classic commit statuses (no
+    // check runs), so Reviewable's `code-review/reviewable` status is a cheap,
+    // un-paginated lookup there.
+    let reviewable_state = last_commit
+        .and_then(|commit| commit.status)
+        .map(|status| status.contexts)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|ctx| ctx.context == REVIEWABLE_CONTEXT)
+        .map(|ctx| ctx.state);
     PrDetail {
         threads,
         reviews,
         ci,
+        reviewable_state,
     }
 }
+
+/// The `context` of the commit status Reviewable posts to drive its own
+/// completion state.
+const REVIEWABLE_CONTEXT: &str = "code-review/reviewable";
 
 /// A PR from phase 1: identity + scalar fields, before detail is fetched.
 struct PrRef {
@@ -791,6 +845,7 @@ struct PrDetail {
     threads: Vec<ReviewThread>,
     reviews: Vec<ReviewSubmission>,
     ci: CiState,
+    reviewable_state: Option<String>,
 }
 
 /// Look up (and process-cache) the current GitHub user's login. Stable for the
@@ -843,7 +898,7 @@ fragment prRef on SearchResultItemConnection {
 /// Phase-2 detail fields, fetched per PR by node id (the expensive part).
 const DETAIL_FIELDS: &str = "reviews(last: 50) { nodes { state author { login } } } \
 reviewThreads(first: 50) { nodes { isResolved comments(last: 1) { nodes { author { login } } } } } \
-commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+commits(last: 1) { nodes { commit { statusCheckRollup { state } status { contexts { context state } } } } }";
 
 /// Turn phase-1 search results into `PrRef`s, keeping only PRs in a scanned
 /// ~/workspace repo (case-insensitive owner/name match) and deduping the PRs
@@ -975,11 +1030,25 @@ struct RawCommitNode {
 #[serde(rename_all = "camelCase", default)]
 struct RawCommit {
     status_check_rollup: Option<RawRollup>,
+    status: Option<RawStatus>,
 }
 
 #[derive(Deserialize, Default)]
 struct RawRollup {
     #[serde(default)]
+    state: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawStatus {
+    #[serde(default)]
+    contexts: Vec<RawStatusContext>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawStatusContext {
+    context: String,
     state: String,
 }
 
@@ -1044,6 +1113,7 @@ mod tests {
             threads: Vec::new(),
             reviews: Vec::new(),
             ci: CiState::None,
+            reviewable_state: None,
         }
     }
 
@@ -1125,6 +1195,63 @@ mod tests {
         let mut p = pr(1, "me", "main", "me/x");
         p.threads = vec![thread(false, Some("me"))];
         p.reviews = vec![review("APPROVED", "alice"), review("CHANGES_REQUESTED", "alice")];
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Grey);
+    }
+
+    // --- Reviewable-driven classification --------------------------------
+
+    #[test]
+    fn reviewable_success_is_green_even_with_a_not_me_last_thread() {
+        // PR 40679: Reviewable SUCCESS, but threads were resolved by the author
+        // with cursor/asaf last. SUCCESS must win — the GitHub thread state is
+        // Reviewable's puppet here.
+        let mut p = pr(1, "asaf", "main", "asaf/x");
+        p.reviewable_state = Some("SUCCESS".to_string());
+        p.threads = vec![thread(true, Some("asaf")), thread(true, Some("cursor"))];
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Green);
+    }
+
+    #[test]
+    fn reviewable_pending_is_red_when_a_resolved_thread_is_not_me_last() {
+        // PR 40837: every thread is resolved (by the author, via Reviewable) but
+        // asaf was last and I never replied. Reviewable isn't SUCCESS, so it must
+        // be red — `isResolved` is ignored on the Reviewable path.
+        let mut p = pr(1, "asaf", "main", "asaf/x");
+        p.reviewable_state = Some("PENDING".to_string());
+        p.threads = vec![thread(true, Some("asaf"))];
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Red);
+    }
+
+    #[test]
+    fn reviewable_pending_is_grey_when_every_thread_is_me_last() {
+        let mut p = pr(1, "asaf", "main", "asaf/x");
+        p.reviewable_state = Some("PENDING".to_string());
+        p.threads = vec![thread(true, Some("me")), thread(false, Some("me"))];
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Grey);
+    }
+
+    #[test]
+    fn reviewable_pending_others_pr_with_no_threads_is_red() {
+        let mut p = pr(1, "asaf", "main", "asaf/x");
+        p.reviewable_state = Some("PENDING".to_string());
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Red);
+    }
+
+    #[test]
+    fn reviewable_pending_my_pr_with_no_threads_is_grey() {
+        let mut p = pr(1, "me", "main", "me/x");
+        p.reviewable_state = Some("PENDING".to_string());
+        assert_eq!(classify_pr(&p, "me"), PrBucket::Grey);
+    }
+
+    #[test]
+    fn reviewable_ignores_github_approval_state() {
+        // On a Reviewable repo, a stray GitHub APPROVED doesn't make it green;
+        // only Reviewable's own SUCCESS does.
+        let mut p = pr(1, "asaf", "main", "asaf/x");
+        p.reviewable_state = Some("PENDING".to_string());
+        p.threads = vec![thread(false, Some("me"))]; // not red
+        p.reviews = vec![review("APPROVED", "me")];
         assert_eq!(classify_pr(&p, "me"), PrBucket::Grey);
     }
 
