@@ -1972,6 +1972,12 @@ impl App {
         self.toggle_row(crate::pane::PaneRole::Terminal);
     }
 
+    /// Toggle the in-worktree PLAN row of the active workspace: an nvim view of
+    /// the plan the agent wrote. See [`Self::toggle_row`].
+    pub(crate) fn toggle_plan_row(&mut self) {
+        self.toggle_row(crate::pane::PaneRole::Plan);
+    }
+
     /// Toggle a stacked review/terminal row inside the active workspace (the
     /// agent's own worktree).
     ///
@@ -2003,6 +2009,7 @@ impl App {
             match role {
                 PaneRole::Review => ws.detached_review = terminal_id,
                 PaneRole::Terminal => ws.detached_terminal = terminal_id,
+                PaneRole::Plan => ws.detached_plan = terminal_id,
                 PaneRole::Agent => {}
             }
             // Refocus the agent (root) pane so focus never dangles on a gone pane.
@@ -2024,10 +2031,16 @@ impl App {
             match role {
                 // The terminal row splits the agent (root) pane.
                 PaneRole::Terminal => ws.agent_pane(),
-                // The review row lands above the terminal row when present, else
-                // above the agent — so review is always the topmost row.
-                PaneRole::Review => ws
+                // The plan row lands above the terminal row when present, else
+                // above the agent.
+                PaneRole::Plan => ws
                     .pane_with_role(PaneRole::Terminal)
+                    .or_else(|| ws.agent_pane()),
+                // The review row lands above the plan/terminal rows when present,
+                // else above the agent — so review is always the topmost row.
+                PaneRole::Review => ws
+                    .pane_with_role(PaneRole::Plan)
+                    .or_else(|| ws.pane_with_role(PaneRole::Terminal))
                     .or_else(|| ws.agent_pane()),
                 PaneRole::Agent => None,
             }
@@ -2040,6 +2053,7 @@ impl App {
         let detached = self.state.workspaces.get(ws_idx).and_then(|ws| match role {
             PaneRole::Review => ws.detached_review.clone(),
             PaneRole::Terminal => ws.detached_terminal.clone(),
+            PaneRole::Plan => ws.detached_plan.clone(),
             PaneRole::Agent => None,
         });
         if let Some(terminal_id) = detached {
@@ -2057,6 +2071,7 @@ impl App {
                     match role {
                         PaneRole::Review => ws.detached_review = None,
                         PaneRole::Terminal => ws.detached_terminal = None,
+                        PaneRole::Plan => ws.detached_plan = None,
                         PaneRole::Agent => {}
                     }
                     self.state.mark_session_dirty();
@@ -2068,6 +2083,7 @@ impl App {
                 match role {
                     PaneRole::Review => ws.detached_review = None,
                     PaneRole::Terminal => ws.detached_terminal = None,
+                    PaneRole::Plan => ws.detached_plan = None,
                     PaneRole::Agent => {}
                 }
             }
@@ -2094,8 +2110,12 @@ impl App {
             };
             match role {
                 PaneRole::Terminal => ws.agent_pane(),
-                PaneRole::Review => ws
+                PaneRole::Plan => ws
                     .pane_with_role(PaneRole::Terminal)
+                    .or_else(|| ws.agent_pane()),
+                PaneRole::Review => ws
+                    .pane_with_role(PaneRole::Plan)
+                    .or_else(|| ws.pane_with_role(PaneRole::Terminal))
                     .or_else(|| ws.agent_pane()),
                 PaneRole::Agent => None,
             }
@@ -2290,6 +2310,175 @@ impl App {
         focused.is_some() && focused == ws.pane_with_role(crate::pane::PaneRole::Review)
     }
 
+    /// Whether the active workspace's focused pane is its PLAN row. Gates the
+    /// `alt+g` plan decision (mirrors [`Self::review_pane_focused`], which gates
+    /// `alt+g` for the review row).
+    pub(crate) fn plan_pane_focused(&self) -> bool {
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let focused = ws.focused_pane_id();
+        focused.is_some() && focused == ws.pane_with_role(crate::pane::PaneRole::Plan)
+    }
+
+    /// The Claude session id herdr has recorded for workspace `ws_idx`'s agent
+    /// (root) pane, if any. Mirrors `terminal_agent_session_info` (creation.rs):
+    /// prefer the live hook authority, fall back to the persisted session. Only
+    /// id-kind refs (Claude/Codex/…); path-kind refs (pi) are not session ids.
+    fn agent_session_id(&self, ws_idx: usize) -> Option<String> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let tid = ws.terminal_id(ws.agent_pane()?)?;
+        let terminal = self.state.terminals.get(tid)?;
+        let session_ref = terminal
+            .hook_authority
+            .as_ref()
+            .and_then(|auth| auth.session_ref.as_ref())
+            .or_else(|| {
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .map(|s| &s.session_ref)
+            })?;
+        (session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id)
+            .then(|| session_ref.value.clone())
+    }
+
+    /// `alt+g` while the PLAN row is focused: read the plan file the agent wrote
+    /// and either accept it or send it back to be revised.
+    ///
+    /// - No `CLAUDE:` comments → pick choice #1 of Claude's ExitPlanMode menu
+    ///   (accept the plan) and return focus to the Agents pane.
+    /// - `CLAUDE:` comments present → snapshot the commented plan (so the next
+    ///   plan-row open can `nvim -d` it against the revision) and ask the agent
+    ///   to revise the plan accordingly.
+    ///
+    /// Reads the plan from disk, so the user must have saved their `CLAUDE:`
+    /// comments in nvim (`:w`) first.
+    pub(crate) fn decide_plan(&mut self) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(session_id) = self.agent_session_id(ws_idx) else {
+            self.state
+                .set_home_toast("plan failed", "agent session not known yet");
+            return;
+        };
+        let Some(plan_path) = crate::plan_review::current_plan_file(&session_id) else {
+            self.state.set_home_toast("plan failed", "no plan file found");
+            return;
+        };
+        let Ok(contents) = std::fs::read_to_string(&plan_path) else {
+            self.state
+                .set_home_toast("plan failed", "could not read plan file");
+            return;
+        };
+        let Some(agent_pane) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.agent_pane())
+        else {
+            self.state.set_home_toast("plan failed", "no agent pane");
+            return;
+        };
+
+        if plan_has_claude_comments(&contents) {
+            self.send_plan_revision(ws_idx, agent_pane, &plan_path);
+        } else {
+            self.accept_plan(ws_idx, agent_pane);
+        }
+    }
+
+    /// Accept the plan: send the bare keystroke `1` to the agent pane (choice #1
+    /// of Claude's ExitPlanMode menu) and return focus to the Agents pane.
+    fn accept_plan(&mut self, ws_idx: usize, agent_pane: crate::layout::PaneId) {
+        let sent = match self.lookup_runtime_sender(ws_idx, agent_pane) {
+            Some(runtime) => {
+                let one = runtime.encode_terminal_key(
+                    crossterm::event::KeyEvent::new(
+                        crossterm::event::KeyCode::Char('1'),
+                        crossterm::event::KeyModifiers::empty(),
+                    )
+                    .into(),
+                );
+                runtime.try_send_bytes(bytes::Bytes::from(one)).is_ok()
+            }
+            None => false,
+        };
+        if sent {
+            self.state.set_home_focus(crate::app::state::FocusPane::Agents);
+            self.state.set_home_toast("plan accepted", "selected accept-plan");
+        } else {
+            self.state.set_home_toast("plan failed", "agent not running");
+        }
+    }
+
+    /// Send the plan back to the agent to revise: snapshot the commented plan,
+    /// then write a revise prompt into the agent pane and submit it. Mirrors
+    /// [`Self::send_claude_fix_command`] (text bytes then a separate Enter).
+    fn send_plan_revision(
+        &mut self,
+        ws_idx: usize,
+        agent_pane: crate::layout::PaneId,
+        plan_path: &std::path::Path,
+    ) {
+        // Don't clobber a half-typed prompt (see `send_claude_fix_command`).
+        if self.agent_prompt_busy(ws_idx, agent_pane) {
+            self.state.set_home_toast(
+                "plan skipped",
+                "agent has a prompt typed — clear it first",
+            );
+            return;
+        }
+
+        // Snapshot the commented plan for the next round's `nvim -d`. Keyed by
+        // workspace id (one in-flight plan review per agent). Non-fatal on error
+        // — we can still ask for the revision, just without the later diff.
+        if let Some(ws_id) = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) {
+            match snapshot_plan(&ws_id, plan_path) {
+                Ok(snapshot) => {
+                    if let Some(ws) = self.state.workspaces.get_mut(ws_idx) {
+                        ws.plan_snapshot = Some(snapshot);
+                    }
+                }
+                Err(err) => self.state.set_home_toast("plan snapshot failed", err),
+            }
+        }
+
+        let prompt = plan_revision_prompt(&plan_path.to_string_lossy());
+        let result: Result<(), String> = match self.lookup_runtime_sender(ws_idx, agent_pane) {
+            None => Err("agent not running".to_string()),
+            Some(runtime) => {
+                let text_bytes = super::api_helpers::encode_api_text(runtime, &prompt);
+                runtime
+                    .try_send_bytes(bytes::Bytes::from(text_bytes))
+                    .map_err(|err| err.to_string())
+                    .and_then(|()| {
+                        let enter = runtime.encode_terminal_key(
+                            crossterm::event::KeyEvent::new(
+                                crossterm::event::KeyCode::Enter,
+                                crossterm::event::KeyModifiers::empty(),
+                            )
+                            .into(),
+                        );
+                        runtime
+                            .try_send_bytes(bytes::Bytes::from(enter))
+                            .map_err(|err| err.to_string())
+                    })
+            }
+        };
+        match result {
+            Ok(()) => self.state.set_home_toast(
+                "revision sent",
+                "asked agent to revise the plan for CLAUDE: comments",
+            ),
+            Err(err) => self.state.set_home_toast("plan failed", err),
+        }
+    }
+
     /// alt+g: hand the review-row context to the active workspace's agent.
     /// Writes a prompt into the agent (root) pane and submits it with Enter.
     ///
@@ -2422,6 +2611,9 @@ impl App {
         role: crate::pane::PaneRole,
     ) -> Option<(Vec<String>, PathBuf)> {
         use crate::pane::PaneRole;
+        // The plan row needs the agent's session id to locate its plan file;
+        // resolve it before borrowing `ws` (the lookup takes `&self`).
+        let plan_session_id = self.agent_session_id(ws_idx);
         let ws = self.state.workspaces.get(ws_idx)?;
         let repo_root = ws
             .worktree_space()
@@ -2466,6 +2658,33 @@ impl App {
                 let review_cmd = std::env::var("HERDR_REVIEW_CMD")
                     .unwrap_or_else(|_| "vimrev".to_string());
                 let command_line = format!("{review_cmd} {}", shell_single_quote(&base));
+                let shell = crate::pane::pane_shell(&default_shell);
+                Some((vec![shell, "-ic".to_string(), command_line], cwd))
+            }
+            PaneRole::Plan => {
+                let Some(session_id) = plan_session_id else {
+                    self.state
+                        .set_home_toast("plan failed", "agent session not known yet");
+                    return None;
+                };
+                let Some(plan) = crate::plan_review::current_plan_file(&session_id) else {
+                    self.state.set_home_toast("plan failed", "no plan file found");
+                    return None;
+                };
+                // Open the plan in nvim; when a snapshot of the last commented
+                // version exists, open `nvim -d` so the user sees how the agent's
+                // revision compares to what they commented on (snapshot on the
+                // left, current/revised plan on the right).
+                let editor =
+                    std::env::var("HERDR_PLAN_EDITOR").unwrap_or_else(|_| "nvim".to_string());
+                let plan_arg = shell_single_quote(&plan.to_string_lossy());
+                let command_line = match ws.plan_snapshot.as_ref().filter(|p| p.exists()) {
+                    Some(snapshot) => format!(
+                        "{editor} -d {} {plan_arg}",
+                        shell_single_quote(&snapshot.to_string_lossy()),
+                    ),
+                    None => format!("{editor} {plan_arg}"),
+                };
                 let shell = crate::pane::pane_shell(&default_shell);
                 Some((vec![shell, "-ic".to_string(), command_line], cwd))
             }
@@ -2655,6 +2874,46 @@ touched files or delete just those comment lines) so the checkout is clean.",
     )
 }
 
+/// Whether the plan file carries any user `CLAUDE:` comments. A line counts when,
+/// after stripping leading list/heading/quote markers and an HTML-comment opener,
+/// it starts with `CLAUDE:` — so `CLAUDE: …`, `- CLAUDE: …` and `<!-- CLAUDE: …`
+/// match, but inline prose mentions like "...starts with `CLAUDE:`" do not.
+fn plan_has_claude_comments(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed =
+            line.trim_start_matches(|c: char| matches!(c, '-' | '*' | '>' | '#') || c == ' ');
+        let trimmed = trimmed
+            .strip_prefix("<!--")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        trimmed.starts_with("CLAUDE:")
+    })
+}
+
+/// The prompt sent to the agent when the reviewed plan has `CLAUDE:` comments.
+/// `plan_path` is embedded so the agent edits the right file. Kept MULTI-LINE on
+/// purpose — see [`claude_fix_prompt`] for why the trailing Enter needs it.
+fn plan_revision_prompt(plan_path: &str) -> String {
+    format!(
+        "I reviewed your plan at `{plan_path}` and left feedback as comments that start with \
+`CLAUDE:`.\n\
+1. Open that plan file and find every comment that starts with `CLAUDE:`.\n\
+2. Revise the plan to address each one.\n\
+3. Remove each `CLAUDE:` comment as you resolve it, then save the updated plan file."
+    )
+}
+
+/// Copy the plan file (with the user's `CLAUDE:` comments) into herdr's data dir,
+/// keyed by workspace id (one in-flight plan review per agent), and return the
+/// snapshot path. The next plan-row open diffs against it.
+fn snapshot_plan(ws_id: &str, plan_path: &std::path::Path) -> Result<PathBuf, String> {
+    let dir = crate::session::data_dir().join("plan-snapshots");
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let dest = dir.join(format!("{ws_id}.md"));
+    std::fs::copy(plan_path, &dest).map_err(|err| err.to_string())?;
+    Ok(dest)
+}
+
 /// Best-effort heuristic: does the cursor's row (`row`) already contain
 /// user-typed text to the LEFT of the cursor (`cursor_col`)?
 ///
@@ -2677,8 +2936,23 @@ fn prompt_has_typed_text(row: &str, cursor_col: u16) -> bool {
 mod claude_fix_tests {
     use super::{
         claude_fix_prompt, claude_reply_prompt, concise_gh_checkout_error, create_agent_argv,
-        prompt_has_typed_text,
+        plan_has_claude_comments, prompt_has_typed_text,
     };
+
+    #[test]
+    fn plan_comments_match_markers_not_prose() {
+        // User-inserted comments in their various markdown shapes count.
+        assert!(plan_has_claude_comments("CLAUDE: rethink step 2"));
+        assert!(plan_has_claude_comments("- CLAUDE: drop this section"));
+        assert!(plan_has_claude_comments("  <!-- CLAUDE: why nvim? -->"));
+        // Prose that merely mentions the convention (e.g. a plan about herdr
+        // itself) must not count as a pending comment.
+        assert!(!plan_has_claude_comments(
+            "1. Find every comment that starts with `CLAUDE:`."
+        ));
+        assert!(!plan_has_claude_comments("see CLAUDE.md for the convention"));
+        assert!(!plan_has_claude_comments("# A plan with no review notes\n\nbody"));
+    }
 
     #[test]
     fn checkout_error_surfaces_fatal_over_git_chatter() {

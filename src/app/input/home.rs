@@ -125,6 +125,14 @@ impl App {
                     self.toggle_terminal_row();
                     return false;
                 }
+                // alt+p toggles the PLAN row: opens nvim on the plan the active
+                // agent wrote (a vimdiff against the last commented snapshot when
+                // one exists). alt+g in that row accepts the plan or sends it
+                // back to the agent to fix `CLAUDE:` comments.
+                KeyCode::Char('p') => {
+                    self.toggle_plan_row();
+                    return false;
+                }
                 // alt+w opens the active worktree's branch PR in Graphite;
                 // alt+W (shift) opens it in Reviewable.
                 KeyCode::Char('w') => {
@@ -133,6 +141,13 @@ impl App {
                 }
                 KeyCode::Char('W') => {
                     self.open_active_worktree_in_review(PrSite::Reviewable);
+                    return false;
+                }
+                // alt+g, while the PLAN row is focused, decides the plan: accept
+                // it (no `CLAUDE:` comments) or send it back to the agent to
+                // revise (comments present) — see `decide_plan`.
+                KeyCode::Char('g') if self.plan_pane_focused() => {
+                    self.decide_plan();
                     return false;
                 }
                 // alt+g, while the review row is focused, tells the workspace's
@@ -505,7 +520,9 @@ impl AppState {
             {
                 self.request_home_kill_agent();
             }
-            KeyCode::Char('p') if cmd => self.request_home_submit_pr(),
+            // alt+u submits a PR for the focused branch/agent. Moved off alt+p,
+            // which now opens the plan-review row on the Main surface.
+            KeyCode::Char('u') if cmd => self.request_home_submit_pr(),
             KeyCode::Char(c) if cmd && c.is_ascii_digit() && c != '0' => {
                 self.home_jump_to_agent((c as u8 - b'1') as usize);
             }
@@ -528,7 +545,7 @@ impl AppState {
         true
     }
 
-    fn set_home_focus(&mut self, focus: FocusPane) {
+    pub(crate) fn set_home_focus(&mut self, focus: FocusPane) {
         // Leaving the Agents pane always returns it to the agents list and snaps
         // the highlight back to the agent shown in Main, so you land back on what
         // you can actually see. Its sub-panes — the repo picker (`n`) and the

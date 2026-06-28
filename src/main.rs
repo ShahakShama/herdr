@@ -38,6 +38,7 @@ mod layout;
 mod logging;
 mod pane;
 mod persist;
+mod plan_review;
 mod platform;
 mod product_announcements;
 mod protocol;

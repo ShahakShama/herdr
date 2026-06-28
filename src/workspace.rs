@@ -118,6 +118,14 @@ pub struct Workspace {
     /// Transient: the kept-alive terminal-row terminal when that row is detached
     /// (toggled closed). Re-attaching reuses this terminal. Not serialized.
     pub(crate) detached_terminal: Option<TerminalId>,
+    /// Transient: the kept-alive plan-row terminal when that row is detached
+    /// (toggled closed). Re-attaching reuses this terminal. Not serialized.
+    pub(crate) detached_plan: Option<TerminalId>,
+    /// Transient: snapshot of the plan file (with the user's `CLAUDE:` comments)
+    /// saved when the plan was last sent back to the agent for revision, so the
+    /// next plan-row open can `nvim -d` it against the agent's revised plan. Not
+    /// serialized.
+    pub(crate) plan_snapshot: Option<PathBuf>,
     /// Transient: `origin/<base>` oid the open review row's `vimrev` was launched
     /// against, used to detect that the diff base has since moved (see
     /// [`PrReviewDrift::base_moved`]). Set when a PR review row spawns; not
@@ -269,6 +277,8 @@ impl Workspace {
                 active_tab: 0,
                 detached_review: None,
                 detached_terminal: None,
+                detached_plan: None,
+                plan_snapshot: None,
                 review_base_oid: None,
                 pr_review_drift: None,
                 review_vs_origin: false,
@@ -903,6 +913,8 @@ impl Workspace {
             active_tab: 0,
             detached_review: None,
             detached_terminal: None,
+            detached_plan: None,
+            plan_snapshot: None,
             review_base_oid: None,
             pr_review_drift: None,
             review_vs_origin: false,

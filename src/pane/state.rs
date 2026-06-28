@@ -2,8 +2,8 @@ use crate::terminal::TerminalId;
 
 /// The role a pane plays inside a workspace's stacked layout.
 ///
-/// A workspace can hold up to three stacked rows in fixed order top→bottom:
-/// `Review` (topmost) / `Terminal` (middle) / `Agent` (always bottom). The role
+/// A workspace can hold up to four stacked rows in fixed order top→bottom:
+/// `Review` (topmost) / `Plan` / `Terminal` / `Agent` (always bottom). The role
 /// determines split placement and keeps the extra rows out of the agents list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PaneRole {
@@ -11,6 +11,9 @@ pub enum PaneRole {
     Agent,
     Review,
     Terminal,
+    /// An nvim row reviewing the plan the agent wrote (alt+p); decided with
+    /// alt+s. See [`crate::plan_review`].
+    Plan,
 }
 
 /// Viewport state for a pane.

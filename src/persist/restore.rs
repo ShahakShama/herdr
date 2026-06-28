@@ -337,6 +337,8 @@ fn restore_workspace(
             tabs,
             detached_review: None,
             detached_terminal: None,
+            detached_plan: None,
+            plan_snapshot: None,
             review_base_oid: None,
             pr_review_drift: None,
             review_vs_origin: false,
